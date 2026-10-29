@@ -1,0 +1,22 @@
+# --- Web / API ---
+Django>=5.2,<5.3
+django-ninja>=1.4
+whitenoise>=6.7
+python-dotenv>=1.0
+django-cors-headers>=4.4
+# --- Database MySQL (nếu mysqlclient cài lỗi: pip install PyMySQL) ---
+mysqlclient>=2.2
+# --- Lịch chạy ---
+croniter>=2.0
+tzdata               # Windows cần để dùng múi giờ Asia/Ho_Chi_Minh
+# --- Xử lý dữ liệu ---
+pandas>=2.2
+openpyxl>=3.1
+xlrd>=2.0            # đọc file .xls do MES xuất
+# --- Tự động hóa MESClient (chỉ chạy trên Windows) ---
+pywinauto>=0.6.8 ; sys_platform == "win32"
+pywin32>=306 ; sys_platform == "win32"
+psutil>=5.9
+pillow>=10.0
+# --- Web server production (Docker/Linux) ---
+gunicorn>=22.0 ; sys_platform != "win32"

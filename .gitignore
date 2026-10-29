@@ -1,0 +1,8 @@
+backend/.env
+backend/.venv/
+backend/logs/
+backend/storage/
+backend/staticfiles/
+backend/dev.sqlite3
+__pycache__/
+*.pyc

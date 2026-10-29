@@ -1,0 +1,36 @@
+# SMS backend API — chạy trên chính máy Windows có MESClient (Docker Desktop)
+#   docker compose up -d --build        → http://<IP máy>:8000/api/health  (tài liệu: /api/docs)
+#   docker compose logs -f api
+# MySQL dùng bản đang cài trên Windows (quản lý bằng Workbench), container gọi qua host.docker.internal.
+# Worker (run_worker) vẫn chạy ngoài Docker trên Windows và dùng chung thư mục storage + MySQL.
+
+services:
+  api:
+    build: .
+    image: sms-backend:latest
+    container_name: sms-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_ENGINE: mysql
+      DB_HOST: host.docker.internal       # MySQL trên máy Windows
+      DJANGO_DEBUG: "0"
+      STORAGE_DIR: /app/storage
+      LOG_DIR: /app/logs
+    ports:
+      - "${SMS_PORT:-8000}:8000"
+    volumes:
+      - ./storage:/app/storage            # cùng thư mục worker ghi file (backend/storage)
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Tùy chọn: đưa API ra https://sms-backend.dongyang.site qua Cloudflare Tunnel
+  # Bật bằng: docker compose --profile tunnel up -d   (cần CLOUDFLARE_TUNNEL_TOKEN trong .env)
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - api

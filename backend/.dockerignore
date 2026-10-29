@@ -1,0 +1,22 @@
+# Không đưa vào image
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+dev.sqlite3
+storage/
+logs/
+staticfiles/
+scripts/*.bat
+.git/
+.gitignore
+.vscode/
+.idea/
+*.log
+Dockerfile
+docker-compose*.yml
+.dockerignore
