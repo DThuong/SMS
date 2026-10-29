@@ -1,22 +1,57 @@
-# Không đưa vào image
+# ===== Không đưa vào image Docker =====
+# Image chỉ cần: manage.py, requirements.txt, config/, apps/, scripts/entrypoint.sh
+# (`**/` = áp dụng cho mọi thư mục con, không chỉ thư mục gốc)
+
+# Bí mật — container đọc .env lúc CHẠY qua env_file trong docker-compose.yml, không nhúng vào image
 .env
 .env.*
 !.env.example
+
+# Môi trường Python trên Windows (255 MB) — image tự cài thư viện từ requirements.txt
 .venv/
 venv/
-__pycache__/
-*.pyc
-*.pyo
-dev.sqlite3
+env/
+
+# File Python biên dịch / cache công cụ
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Dữ liệu lúc chạy — gắn từ máy vào container qua volume (./storage, ./logs)
 storage/
 logs/
 staticfiles/
+*.log
+dev.sqlite3
+*.sqlite3
+
+# File dữ liệu / ảnh lẻ (file MES xuất, ảnh lỗi)
+**/*.xls
+**/*.xlsx
+**/~$*
+**/*.png
+**/*.jpg
+
+# Chỉ dùng trên Windows / chỉ dùng trong MySQL Workbench
 scripts/*.bat
+sql/
+
+# Git, IDE, hệ điều hành
 .git/
 .gitignore
+.gitattributes
 .vscode/
 .idea/
-*.log
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+
+# Tài liệu và file cấu hình Docker
+*.md
 Dockerfile
 docker-compose*.yml
 .dockerignore

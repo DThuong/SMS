@@ -4,37 +4,57 @@ from apps.core.models import Oper
 from apps.jobs.models import JobRun
 
 
-class ExportFile(models.Model):
-    """Một file kế hoạch đã lấy từ MES (mỗi Oper mỗi lần chạy một file)"""
+class File(models.Model):
+    """
+    Bảng `files` — mọi file một lần chạy job lấy từ MES:
+      kind = workorder  : file kế hoạch Work Order của 1 xưởng (oper) → các dòng nằm ở bảng work_orders
+      kind = production : file sản lượng theo giờ (TV) của 1 ngày (report_date) → DYS tải về import rồi báo lại
+    """
+    class Kind(models.TextChoices):
+        WORKORDER = "workorder", "Kế hoạch Work Order"
+        PRODUCTION = "production", "Sản lượng theo giờ"
+
     class Status(models.TextChoices):
         SAVED = "saved", "Đã lưu"
-        DELETED = "deleted", "Đã xóa file"
+        IMPORTED = "imported", "DYS đã import"
+        IMPORT_FAILED = "import_failed", "DYS import lỗi"
 
+    kind = models.CharField("Loại file", max_length=20, choices=Kind.choices)
     run = models.ForeignKey(JobRun, null=True, blank=True, on_delete=models.SET_NULL,
-                            related_name="export_files", verbose_name="Lần chạy")
-    oper = models.ForeignKey(Oper, on_delete=models.PROTECT, related_name="export_files", verbose_name="Xưởng")
-    export_date = models.DateTimeField("Export Date (MES)", db_index=True)
+                            related_name="files", verbose_name="Lần chạy")
+    oper = models.ForeignKey(Oper, null=True, blank=True, on_delete=models.PROTECT,
+                             related_name="files", verbose_name="Xưởng (file workorder)")
+    report_date = models.DateField("Ngày sản lượng (file production)", null=True, blank=True)
+    export_date = models.DateTimeField("Thời điểm xuất từ MES")
     file_path = models.CharField("Đường dẫn", max_length=500, help_text="Tương đối so với STORAGE_DIR")
     file_name = models.CharField("Tên file", max_length=200)
     rows = models.PositiveIntegerField("Số dòng", default=0)
     size = models.PositiveIntegerField("Dung lượng (byte)", default=0)
     checksum = models.CharField("SHA-256", max_length=64, blank=True)
     status = models.CharField("Trạng thái", max_length=20, choices=Status.choices, default=Status.SAVED)
+    file_deleted = models.BooleanField("Đã xóa file trên ổ đĩa", default=False)
+    imported_at = models.DateTimeField("DYS import lúc", null=True, blank=True)
+    imported_by = models.CharField("Người import (DYS)", max_length=150, blank=True)
+    dys_message = models.TextField("Thông báo từ DYS", blank=True)
     created_at = models.DateTimeField("Tạo lúc", auto_now_add=True)
 
     class Meta:
-        ordering = ["-export_date"]
-        indexes = [models.Index(fields=["oper", "export_date"])]
-        verbose_name = "File kế hoạch"
-        verbose_name_plural = "File kế hoạch"
+        db_table = "files"
+        ordering = ["-export_date", "-id"]
+        indexes = [models.Index(fields=["kind", "export_date"]),
+                   models.Index(fields=["kind", "oper", "export_date"]),
+                   models.Index(fields=["kind", "report_date"])]
+        verbose_name = "File"
+        verbose_name_plural = "File"
 
     def __str__(self):
-        return f"{self.oper.folder}/{self.file_name}"
+        return f"[{self.kind}] {self.file_name}"
 
 
 class WorkOrder(models.Model):
-    """Một dòng Work Order trong file kế hoạch (snapshot tại Export Date)"""
-    export_file = models.ForeignKey(ExportFile, on_delete=models.CASCADE, related_name="work_orders")
+    """Bảng `work_orders` — một dòng Work Order trong file kế hoạch (snapshot tại Export Date)"""
+    file = models.ForeignKey(File, on_delete=models.CASCADE, related_name="work_orders",
+                                    verbose_name="File kế hoạch")
     oper = models.ForeignKey(Oper, on_delete=models.PROTECT, related_name="work_orders")
     factory = models.CharField("Factory", max_length=20, blank=True)
     work_order_no = models.CharField("Work Order", max_length=50, db_index=True)
@@ -57,45 +77,11 @@ class WorkOrder(models.Model):
     extra = models.JSONField("Cột khác", default=dict, blank=True)
 
     class Meta:
-        ordering = ["export_file", "id"]
-        indexes = [models.Index(fields=["oper", "export_file"])]
+        db_table = "work_orders"
+        ordering = ["file", "id"]
+        indexes = [models.Index(fields=["oper", "file"])]
         verbose_name = "Work Order"
         verbose_name_plural = "Work Order"
 
     def __str__(self):
         return self.work_order_no
-
-
-class ProductionReport(models.Model):
-    """
-    File sản lượng theo giờ (타임별 실적 조회 TV) của một ngày.
-    DYS tải file về rồi tự import bằng token người dùng, sau đó báo kết quả lại cho SMS.
-    """
-    class Status(models.TextChoices):
-        READY = "ready", "Sẵn sàng cho DYS import"
-        IMPORTED = "imported", "DYS đã import"
-        IMPORT_FAILED = "import_failed", "DYS import lỗi"
-
-    run = models.ForeignKey(JobRun, null=True, blank=True, on_delete=models.SET_NULL,
-                            related_name="production_reports", verbose_name="Lần chạy")
-    report_date = models.DateField("Ngày sản lượng", db_index=True)
-    export_date = models.DateTimeField("Thời điểm xuất từ MES", null=True, blank=True)
-    file_path = models.CharField("Đường dẫn", max_length=500, help_text="Tương đối so với STORAGE_DIR")
-    file_name = models.CharField("Tên file", max_length=200)
-    rows = models.PositiveIntegerField("Số dòng", default=0)
-    size = models.PositiveIntegerField("Dung lượng (byte)", default=0)
-    checksum = models.CharField("SHA-256", max_length=64, blank=True)
-    status = models.CharField("Trạng thái", max_length=20, choices=Status.choices, default=Status.READY)
-    file_deleted = models.BooleanField("Đã xóa file", default=False)
-    imported_at = models.DateTimeField("DYS import lúc", null=True, blank=True)
-    imported_by = models.CharField("Người import (DYS)", max_length=150, blank=True)
-    dys_message = models.TextField("Thông báo từ DYS", blank=True)
-    created_at = models.DateTimeField("Tạo lúc", auto_now_add=True)
-
-    class Meta:
-        ordering = ["-id"]
-        verbose_name = "Báo cáo sản lượng"
-        verbose_name_plural = "Báo cáo sản lượng"
-
-    def __str__(self):
-        return f"Sản lượng {self.report_date} ({self.get_status_display()})"

@@ -6,17 +6,17 @@ from datetime import datetime
 from django.conf import settings
 from django.utils import timezone
 
-from .models import JobRun, JobRunStep
+from .models import JobRun, JobLog
 from .registry import HANDLERS
 
 
 class DbStepHandler(logging.Handler):
-    """Mỗi dòng log của job = một bước trong timeline (bảng jobs_jobrunstep)"""
+    """Mỗi dòng log của job = một dòng trong nhật ký (bảng job_logs)"""
 
     def __init__(self, run: JobRun):
         super().__init__(level=logging.INFO)
         self.run = run
-        self.seq = run.steps.count()
+        self.seq = run.logs.count()
 
     def emit(self, record):
         try:
@@ -26,9 +26,9 @@ class DbStepHandler(logging.Handler):
                 tb = "".join(traceback.format_exception(*record.exc_info)).strip().splitlines()
                 msg += "\n" + "\n".join(tb[-3:])
             self.seq += 1
-            JobRunStep.objects.create(
+            JobLog.objects.create(
                 run=self.run, seq=self.seq,
-                level=record.levelname if record.levelname in JobRunStep.Level.values else "INFO",
+                level=record.levelname if record.levelname in JobLog.Level.values else "INFO",
                 message=msg, screenshot=getattr(record, "screenshot", ""),
             )
         except Exception:

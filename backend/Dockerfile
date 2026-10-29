@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 
 COPY --chown=app:app . .
 RUN DJANGO_SECRET_KEY=build-only DB_ENGINE=sqlite python manage.py collectstatic --noinput \
-    && mkdir -p storage logs && chown -R app:app storage logs staticfiles \
+    && mkdir -p storage logs staticfiles && chown -R app:app storage logs staticfiles \
     && chmod +x scripts/entrypoint.sh
 
 USER app

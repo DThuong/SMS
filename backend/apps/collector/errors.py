@@ -30,7 +30,7 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_START_FAILED": ("Không tự mở được MESClient",
                          "Kiểm tra đường dẫn 'mes_exe_path', thử mở MESClient bằng tay trên máy agent."),
     "MES_LOGIN_REQUIRED": ("MES đang đăng xuất, chưa có tài khoản",
-                           "Điền 'mes_user_id' và 'mes_password' trong bảng core_setting."),
+                           "Điền 'mes_user_id' và 'mes_password' trong bảng settings."),
     "MES_LOGIN_FAILED": ("Không đăng nhập được MES",
                          "Kiểm tra lại 'mes_user_id' / 'mes_password', hoặc đăng nhập MES bằng tay một lần để xem lỗi."),
     "MES_POPUP_BLOCKING": ("Có hộp thoại đang chặn MES",

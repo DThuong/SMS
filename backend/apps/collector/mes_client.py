@@ -4,8 +4,10 @@ Tự mở MESClient, tự đăng nhập khi bị đăng xuất, tự bấm "No" 
 """
 import ctypes
 import logging
+import re
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 import psutil
@@ -22,11 +24,77 @@ MAIN_TITLE_RE = r".*MESClient.*"
 INFO_WORDS = ("complete", "success", "saved", "export", "완료", "성공", "저장")
 
 
-def _mes_pid() -> int | None:
-    for p in psutil.process_iter(["name"]):
-        if (p.info["name"] or "").lower() == "mesclient.exe":
-            return p.pid
-    return None
+def _norm_menu(text: str) -> str:
+    """Chuẩn hóa tên menu: NFKC (ngoặc full-width → thường), bỏ '&' phím tắt, gộp khoảng trắng, chữ thường"""
+    t = unicodedata.normalize("NFKC", text or "").replace("&", "")
+    t = t.split("\t")[0]                       # bỏ phần phím tắt "Ctrl+X" phía sau tab
+    return re.sub(r"\s+", " ", t).strip().casefold()
+
+
+def _strip_prefix(text: str) -> str:
+    """Bỏ tiền tố dạng "[PM]" ở đầu tên menu"""
+    return re.sub(r"^\[[^\]]*\]\s*", "", text)
+
+
+def _mes_procs() -> list:
+    """Mọi tiến trình MESClient.exe đang chạy (có thể nhiều hơn 1: bản cập nhật, mở 2 lần...)"""
+    return [p for p in psutil.process_iter(["name"]) if (p.info["name"] or "").lower() == "mesclient.exe"]
+
+
+def _top_windows() -> list[tuple[int, int, str, int]]:
+    """Cửa sổ cấp cao đang hiện: (hwnd, pid, tiêu đề, diện tích)"""
+    import win32process
+
+    res = []
+
+    def visit(h, _):
+        try:
+            if win32gui.IsWindowVisible(h):
+                title = win32gui.GetWindowText(h)
+                if title:
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                    l, t, r, b = win32gui.GetWindowRect(h)
+                    res.append((h, pid, title, (r - l) * (b - t)))
+        except Exception:
+            pass
+        return True
+
+    win32gui.EnumWindows(visit, None)
+    return res
+
+
+def _main_window_win32(pids: set) -> tuple[int, int] | None:
+    """
+    Cửa sổ chính MESClient (tiêu đề chứa 'MESClient') bằng Win32 — nhanh, không phụ thuộc UIA khi MES đang bận.
+    Ưu tiên cửa sổ của tiến trình MESClient.exe; không có thì nhận cửa sổ của BẤT KỲ tiến trình nào có tiêu đề đó
+    (MES chạy qua launcher / tên tiến trình khác).
+    """
+    wins = [w for w in _top_windows() if re.match(MAIN_TITLE_RE, w[2])]
+    if not wins:
+        return None
+    own = [w for w in wins if w[1] in pids]
+    if not own:
+        # Tiến trình khác tên: chỉ nhận cửa sổ có tiêu đề BẮT ĐẦU bằng "MESClient" và không phải Explorer/VS Code...
+        skip = {"explorer.exe", "code.exe", "powershell.exe", "cmd.exe", "windowsterminal.exe"}
+
+        def name_of(pid):
+            try:
+                return psutil.Process(pid).name().lower()
+            except Exception:
+                return ""
+        own = [w for w in wins if w[2].startswith("MESClient") and name_of(w[1]) not in skip]
+    if not own:
+        return None
+    h, pid, _, _ = max(own, key=lambda w: w[3])
+    return h, pid
+
+
+def mes_diagnostics() -> str:
+    """Tiến trình + cửa sổ có chữ 'mes' — ghi vào lỗi để biết MES có thật sự đang chạy không"""
+    procs = sorted({f"{p.info['name']} (pid {p.pid})" for p in psutil.process_iter(["name"])
+                    if "mes" in (p.info["name"] or "").lower()})
+    wins = sorted({f"'{t[:60]}' (pid {pid})" for _, pid, t, _ in _top_windows() if "mes" in t.lower()})
+    return f"Tiến trình có chữ 'mes': {procs or 'không có'}; cửa sổ có chữ 'mes': {wins or 'không có'}"
 
 
 class MesClient:
@@ -36,31 +104,58 @@ class MesClient:
         self.pid = None
         self.main = None
         self.hwnd = None
+        self.exe_found = ""          # đường dẫn MESClient.exe thật của tiến trình đang chạy
 
     # ================= Kết nối / tự mở =================
     def _attach(self, timeout: float) -> bool:
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            pid = _mes_pid()
-            if pid:
-                spec = Desktop(backend="uia").window(process=pid, title_re=MAIN_TITLE_RE,
-                                                     control_type="Window", found_index=0)
-                if spec.exists(timeout=1):
-                    self.pid, self.main = pid, spec
-                    self.hwnd = spec.wrapper_object().handle
-                    return True
+        while True:
+            pids = {p.pid for p in _mes_procs()}
+            hit = _main_window_win32(pids)
+            if hit:
+                h, pid = hit
+                self.pid, self.hwnd = pid, h
+                self.main = Desktop(backend="uia").window(handle=h)
+                self.exe_found = self._exe_of(pid)
+                return True
+            if pids:
+                # Dự phòng: tìm qua UI Automation
+                for pid in pids:
+                    spec = Desktop(backend="uia").window(process=pid, title_re=MAIN_TITLE_RE,
+                                                         control_type="Window", found_index=0)
+                    if spec.exists(timeout=1):
+                        self.pid, self.main = pid, spec
+                        self.hwnd = spec.wrapper_object().handle
+                        self.exe_found = self._exe_of(pid)
+                        return True
+            if time.time() >= deadline:
+                return False
             time.sleep(1)
-        return False
+
+    @staticmethod
+    def _exe_of(pid: int) -> str:
+        try:
+            return psutil.Process(pid).exe()
+        except Exception:
+            return ""
 
     def connect(self, exe_path: str = "", auto_start: bool = True, start_timeout: int = 90):
-        if self._attach(timeout=3):
+        running = bool(_mes_procs()) or _main_window_win32(set()) is not None
+        # MES đang chạy nhưng có thể bận (đang tải, đổi kích thước form...) → chờ lâu hơn
+        if self._attach(timeout=20 if running else 3):
             self.log.info("Đã kết nối MESClient: %s", self.main.window_text())
             return
+        if _mes_procs():
+            raise MesError("MESClient đang chạy nhưng sau 20s không thấy cửa sổ chính "
+                           "(MES đang treo/bận hoặc đang ở hộp thoại khác) — kiểm tra màn hình máy MES",
+                           "MES_NOT_RUNNING")
+        self.log.info("Không thấy cửa sổ MESClient. %s", mes_diagnostics())
         if not auto_start:
             raise MesError("MESClient chưa mở trên máy agent", "MES_NOT_RUNNING")
         exe = Path(exe_path or "")
         if not exe_path or not exe.is_file():
-            raise MesError(f"MESClient chưa mở và không thấy file chạy tại '{exe_path}'", "MES_NOT_RUNNING")
+            raise MesError(f"MESClient chưa mở và không thấy file chạy tại '{exe_path}'. "
+                           "Mở MESClient bằng tay một lần — agent sẽ tự ghi nhớ đường dẫn đúng", "MES_NOT_RUNNING")
         self.log.info("MESClient chưa mở → đang tự mở %s", exe)
         try:
             subprocess.Popen([str(exe)], cwd=str(exe.parent))
@@ -257,21 +352,59 @@ class MesClient:
         raise MesError(f"Đã chọn menu nhưng không thấy màn hình '{form_id}'", "MES_FORM_NOT_FOUND")
 
     # ---------- menu ----------
-    def _menu_items(self, name: str):
-        """Mọi mục menu tên `name` trong mọi cửa sổ của MESClient (menu xổ ra là cửa sổ riêng)"""
-        found = []
+    def _all_menu_items(self):
+        items = []
         for top in Desktop(backend="uia").windows(process=self.pid):
             try:
-                found += [m for m in top.descendants(control_type="MenuItem") if m.window_text().strip() == name]
+                items += top.descendants(control_type="MenuItem")
             except Exception:
                 pass
-        return found
+        return items
+
+    def _menu_items(self, name: str):
+        """
+        Mọi mục menu tên `name` trong mọi cửa sổ của MESClient (menu xổ ra là cửa sổ riêng).
+        So khớp linh hoạt theo thứ tự ưu tiên:
+          1. trùng sau khi chuẩn hóa (bỏ '&', gộp khoảng trắng, NFKC cho ngoặc full-width, không phân biệt hoa thường)
+          2. trùng sau khi bỏ tiền tố dạng "[PM]" (vd "[IQ]Inquiry" ↔ "Inquiry")
+          3. tên menu chứa `name` (chọn tên ngắn nhất)
+        """
+        want = _norm_menu(name)
+        items = []
+        for m in self._all_menu_items():
+            try:
+                items.append((m, _norm_menu(m.window_text())))
+            except Exception:
+                pass
+        exact = [m for m, t in items if t == want]
+        if exact:
+            return exact
+        noprefix = [m for m, t in items if _strip_prefix(t) == _strip_prefix(want)]
+        if noprefix:
+            return noprefix
+        contains = sorted([(len(t), m) for m, t in items if want and want in t], key=lambda x: x[0])
+        return [m for _, m in contains]
+
+    def menu_names(self, limit: int = 80) -> list[str]:
+        """Tên các mục menu đang thấy (để ghi vào lỗi khi không tìm được menu)"""
+        names = []
+        for m in self._all_menu_items():
+            try:
+                t = m.window_text().strip()
+            except Exception:
+                continue
+            if t and t not in names:
+                names.append(t)
+        return names[:limit]
 
     def _click_menu(self, path: list, direct: bool) -> bool:
         leaf = path[-1]
         if direct:
             # Cách 1: Invoke thẳng mục lá (WinForms cho phép kể cả khi menu chưa xổ)
-            for item in self._menu_items(leaf):
+            items = self._menu_items(leaf)
+            if not items and self.restore_maximized_forms():
+                items = self._menu_items(leaf)
+            for item in items:
                 try:
                     item.invoke()
                     self.log.info("Chọn menu '%s'", leaf)
@@ -280,10 +413,17 @@ class MesClient:
                     self.log.info("Invoke '%s' chưa được (%s)", leaf, e)
             return False
         # Cách 2: mở từng cấp menu rồi chọn mục lá
+        if not self._menu_items(path[0]) and self.restore_maximized_forms():
+            self.handle_popup()
         for name in path[:-1]:
             items = self._menu_items(name)
             if not items:
-                raise MesError(f"Không tìm thấy menu '{name}' ({' → '.join(path)})", "MES_MENU_NOT_FOUND")
+                seen = self.menu_names()
+                self.log.error("Các menu MES đang thấy: %s", seen)
+                raise MesError(f"Không tìm thấy menu '{name}' ({' → '.join(path)}). Menu đang thấy: {seen}",
+                               "MES_MENU_NOT_FOUND")
+            if items[0].window_text().strip() != name:
+                self.log.info("Menu '%s' khớp với '%s'", name, items[0].window_text().strip())
             try:
                 items[0].expand()
             except Exception:
@@ -302,27 +442,98 @@ class MesClient:
                 self.log.info("Chọn menu '%s' (mở từng cấp)", leaf)
                 return True
             time.sleep(0.5)
+        seen = self.menu_names()
+        self.log.error("Các menu MES đang thấy: %s", seen)
         # Đóng menu đang xổ (Esc) để không chặn giao diện
         winutil.post_keys(self.hwnd, [win32con.VK_ESCAPE] * 3)
-        raise MesError(f"Không tìm thấy mục menu '{leaf}' ({' → '.join(path)})", "MES_MENU_NOT_FOUND")
+        raise MesError(f"Không tìm thấy mục menu '{leaf}' ({' → '.join(path)}). Menu đang thấy: {seen}",
+                       "MES_MENU_NOT_FOUND")
+
+    def _child_hwnds(self) -> list[int]:
+        """Mọi cửa sổ con (Win32) của MESClient — không phụ thuộc cây UI Automation"""
+        res = []
+        if not self.hwnd:
+            return res
+        try:
+            win32gui.EnumChildWindows(self.hwnd, lambda h, _: res.append(h), None)
+        except Exception:
+            pass
+        return res
+
+    def _mdi_forms(self) -> list[int]:
+        """Các form MDI (cửa sổ con trực tiếp của khung MDIClient)"""
+        res = []
+        for h in self._child_hwnds():
+            try:
+                parent = win32gui.GetParent(h)
+                # Form MDI: có cờ WS_EX_MDICHILD, hoặc nằm trong khung MDIClient
+                # (Win32 thuần: "MDIClient"; WinForms: "WindowsForms10.MDICLIENT.app.0.xxxx")
+                ex = win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE)
+                if ex & 0x40 or (parent and "MDICLIENT" in win32gui.GetClassName(parent).upper()):   # 0x40 = WS_EX_MDICHILD
+                    res.append(h)
+            except Exception:
+                pass
+        return res
+
+    def restore_maximized_forms(self) -> int:
+        """
+        Form con đang PHÓNG TO thì thanh menu của MES không lộ ra cho UI Automation (chỉ thấy 'System')
+        → đưa form về kích thước thường (không đóng form) để chọn được menu.
+        """
+        n = 0
+        for h in self._mdi_forms():
+            if ctypes.windll.user32.IsZoomed(h):
+                win32gui.PostMessage(h, win32con.WM_SYSCOMMAND, win32con.SC_RESTORE, 0)
+                n += 1
+        if n:
+            time.sleep(1.2)
+            self.log.info("Có form đang phóng to che menu → đã đưa %d form về kích thước thường", n)
+        return n
 
     def find_form(self, form_id: str, by: str = "auto_id"):
         """
         Form MDI đang HIỆN và LỚN NHẤT trùng tên/AutomationId.
         (Sau khi đăng nhập MES hay có form ở dạng cửa sổ thu nhỏ, hoặc 2 bản trùng tên.)
-        Trả về WindowSpecification theo handle, hoặc None.
+        Theo tiêu đề: tìm bằng Win32 trước (đúng cả khi form đang phóng to — lúc đó UIA hay không thấy),
+        rồi mới tới UI Automation. Trả về WindowSpecification theo handle, hoặc None.
         """
+        if by == "title":
+            want = _norm_menu(form_id)
+            hs = []
+            for h in self._child_hwnds():
+                try:
+                    if win32gui.IsWindowVisible(h) and _norm_menu(win32gui.GetWindowText(h)) == want:
+                        hs.append(h)
+                except Exception:
+                    pass
+            if hs:
+                def area(h):
+                    l, t, r, b = win32gui.GetWindowRect(h)
+                    return (r - l) * (b - t)
+                return Desktop(backend="uia").window(handle=max(hs, key=area))
+        else:
+            # Theo AutomationId: hỏi UIA trực tiếp từng form MDI theo handle (đúng cả khi form đang phóng to)
+            hs = []
+            for h in self._mdi_forms():
+                try:
+                    if win32gui.IsWindowVisible(h) and \
+                            Desktop(backend="uia").window(handle=h).wrapper_object().element_info.automation_id == form_id:
+                        hs.append(h)
+                except Exception:
+                    pass
+            if hs:
+                return Desktop(backend="uia").window(handle=hs[0])
         try:
             wins = self.main.wrapper_object().descendants(control_type="Window")
         except Exception:
             return None
-        key = (lambda w: w.window_text() == form_id) if by == "title" else \
+        key = (lambda w: _norm_menu(w.window_text()) == _norm_menu(form_id)) if by == "title" else \
               (lambda w: w.element_info.automation_id == form_id)
         found = [w for w in wins if key(w) and w.is_visible()]
         if not found:
             return None
         best = max(found, key=lambda w: w.rectangle().width() * w.rectangle().height())
-        return self.main.child_window(handle=best.handle)
+        return Desktop(backend="uia").window(handle=best.handle)
 
     def maximize(self, form):
         """Phóng to form MDI bằng message (không dùng chuột) để giao diện ổn định, ảnh chụp lỗi đầy đủ"""

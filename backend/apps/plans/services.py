@@ -1,4 +1,4 @@
-"""Lưu kết quả lấy từ MES: file Excel + bảng ExportFile + bảng WorkOrder"""
+"""Lưu kết quả lấy từ MES vào bảng files (+ work_orders) và thư mục storage/"""
 import hashlib
 from pathlib import Path
 from datetime import datetime
@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from apps.core.models import Oper
 
-from .models import ExportFile, WorkOrder
+from .models import File, WorkOrder
 
 # Tên cột trên MES -> tên trường trong bảng WorkOrder
 COLUMN_MAP = {
@@ -62,7 +62,7 @@ def _to_json(v):
     return str(v)
 
 
-def _row_to_workorder(row: dict, ef: ExportFile) -> WorkOrder:
+def _row_to_workorder(row: dict, ef: File) -> WorkOrder:
     data, extra = {}, {}
     for col, val in row.items():
         field = COLUMN_MAP.get(col)
@@ -76,7 +76,7 @@ def _row_to_workorder(row: dict, ef: ExportFile) -> WorkOrder:
         else:
             max_len = WorkOrder._meta.get_field(field).max_length
             data[field] = ("" if val is None else str(val))[:max_len]
-    return WorkOrder(export_file=ef, oper=ef.oper, extra=extra, **data)
+    return WorkOrder(file=ef, oper=ef.oper, extra=extra, **data)
 
 
 def _write_excel(df: pd.DataFrame, oper: Oper, export_dt: datetime):
@@ -94,13 +94,13 @@ def _write_excel(df: pd.DataFrame, oper: Oper, export_dt: datetime):
     return path
 
 
-def save_export(run, oper: Oper, df: pd.DataFrame, export_dt: datetime) -> ExportFile:
+def save_export(run, oper: Oper, df: pd.DataFrame, export_dt: datetime) -> File:
     """export_dt: giờ địa phương (naive) đọc từ dòng 'Export Date' của MES"""
     path = _write_excel(df, oper, export_dt)
     content = path.read_bytes()
     with transaction.atomic():
-        ef = ExportFile.objects.create(
-            run=run, oper=oper,
+        ef = File.objects.create(
+            kind=File.Kind.WORKORDER, run=run, oper=oper,
             export_date=timezone.make_aware(export_dt) if timezone.is_naive(export_dt) else export_dt,
             file_path=str(path.relative_to(settings.STORAGE_DIR)).replace("\\", "/"),
             file_name=path.name, rows=len(df), size=len(content),
@@ -121,11 +121,9 @@ def production_target(report_date) -> Path:
 
 def register_production_file(run, report_date, path: Path, rows: int, export_dt: datetime):
     """Ghi nhận file sản lượng MES đã tự lưu (giữ nguyên file gốc của MES để DYS import)"""
-    from .models import ProductionReport
-
     content = path.read_bytes()
-    return ProductionReport.objects.create(
-        run=run, report_date=report_date,
+    return File.objects.create(
+        kind=File.Kind.PRODUCTION, run=run, report_date=report_date,
         export_date=timezone.make_aware(export_dt) if timezone.is_naive(export_dt) else export_dt,
         file_path=str(path.relative_to(settings.STORAGE_DIR)).replace("\\", "/"),
         file_name=path.name, rows=rows, size=len(content),
@@ -135,14 +133,20 @@ def register_production_file(run, report_date, path: Path, rows: int, export_dt:
 
 def mark_import_result(report, success: bool, message: str = "", imported_by: str = "", delete_file: bool = True):
     """DYS báo kết quả import file sản lượng. Thành công + delete_file → xóa file trên máy"""
-    from .models import ProductionReport
-
-    report.status = ProductionReport.Status.IMPORTED if success else ProductionReport.Status.IMPORT_FAILED
+    report.status = File.Status.IMPORTED if success else File.Status.IMPORT_FAILED
     report.imported_at = timezone.now() if success else None
     report.imported_by = imported_by[:150]
     report.dys_message = message[:5000]
-    if success and delete_file and not report.file_deleted:
-        (settings.STORAGE_DIR / report.file_path).unlink(missing_ok=True)
-        report.file_deleted = True
+    if success and delete_file:
+        delete_file_on_disk(report, save=False)
     report.save()
     return report
+
+
+def delete_file_on_disk(f: File, save: bool = True):
+    """Xóa file trên ổ đĩa, giữ lại dòng trong bảng files (đánh dấu file_deleted)"""
+    if not f.file_deleted:
+        (settings.STORAGE_DIR / f.file_path).unlink(missing_ok=True)
+        f.file_deleted = True
+        if save:
+            f.save(update_fields=["file_deleted"])

@@ -12,7 +12,7 @@ def next_cron_time(cron: str, base: datetime | None = None) -> datetime:
 
 
 class Job(models.Model):
-    """Định nghĩa một loại công việc chạy nền + lịch chạy"""
+    """Bảng `jobs` — ĐỊNH NGHĨA công việc + lịch chạy (chỉ vài dòng cố định: WORKORDER_PLAN, PRODUCTION_OUTPUT, CLEANUP)"""
     code = models.CharField("Mã job", max_length=50, unique=True,
                             help_text="Khớp với handler trong apps/jobs/registry.py")
     name = models.CharField("Tên", max_length=200)
@@ -28,6 +28,7 @@ class Job(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = "jobs"
         ordering = ["id"]
         verbose_name = "Job"
         verbose_name_plural = "Job"
@@ -42,7 +43,7 @@ class Job(models.Model):
 
 
 class JobRun(models.Model):
-    """Một lần chạy job"""
+    """Bảng `job_runs` — MỖI LẦN CHẠY một job: ai yêu cầu, tham số, trạng thái, số dòng, mã lỗi"""
     class Status(models.TextChoices):
         QUEUED = "queued", "Chờ chạy"
         RUNNING = "running", "Đang chạy"
@@ -69,6 +70,7 @@ class JobRun(models.Model):
     finished_at = models.DateTimeField("Kết thúc", null=True, blank=True)
 
     class Meta:
+        db_table = "job_runs"
         ordering = ["-id"]
         indexes = [models.Index(fields=["status", "created_at"])]
         verbose_name = "Lần chạy"
@@ -84,14 +86,14 @@ class JobRun(models.Model):
         return None
 
 
-class JobRunStep(models.Model):
-    """Timeline từng bước của một lần chạy (log chữ, ảnh chỉ khi lỗi)"""
+class JobLog(models.Model):
+    """Bảng `job_logs` — NHẬT KÝ từng bước của một lần chạy (mỗi dòng log 1 bản ghi, ảnh màn hình khi lỗi)"""
     class Level(models.TextChoices):
         INFO = "INFO", "Thông tin"
         WARNING = "WARNING", "Cảnh báo"
         ERROR = "ERROR", "Lỗi"
 
-    run = models.ForeignKey(JobRun, on_delete=models.CASCADE, related_name="steps")
+    run = models.ForeignKey(JobRun, on_delete=models.CASCADE, related_name="logs")
     seq = models.PositiveIntegerField("STT")
     level = models.CharField("Mức", max_length=10, choices=Level.choices, default=Level.INFO)
     message = models.TextField("Nội dung")
@@ -99,14 +101,15 @@ class JobRunStep(models.Model):
     created_at = models.DateTimeField("Thời điểm", auto_now_add=True)
 
     class Meta:
+        db_table = "job_logs"
         ordering = ["run", "seq"]
         unique_together = [("run", "seq")]
-        verbose_name = "Bước"
-        verbose_name_plural = "Các bước"
+        verbose_name = "Nhật ký"
+        verbose_name_plural = "Nhật ký"
 
 
-class WorkerHeartbeat(models.Model):
-    """Worker cập nhật mỗi vòng lặp — dashboard biết worker có đang chạy không"""
+class WorkerStatus(models.Model):
+    """Bảng `worker_status` — 1 dòng duy nhất, worker cập nhật mỗi 5s → biết worker còn sống và đang chạy gì"""
     hostname = models.CharField(max_length=200, blank=True)
     pid = models.PositiveIntegerField(default=0)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -114,5 +117,11 @@ class WorkerHeartbeat(models.Model):
     current_run = models.ForeignKey(JobRun, null=True, blank=True, on_delete=models.SET_NULL)
 
     class Meta:
+        db_table = "worker_status"
         verbose_name = "Trạng thái worker"
         verbose_name_plural = "Trạng thái worker"
+
+    @classmethod
+    def is_online(cls) -> bool:
+        ws = cls.objects.filter(pk=1).first()
+        return bool(ws and ws.last_seen and (timezone.now() - ws.last_seen).total_seconds() < 60)

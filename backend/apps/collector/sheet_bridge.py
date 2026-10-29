@@ -98,30 +98,121 @@ class SheetBridge:
                 pass
         return apps
 
-    def wait_for_export(self, title: str, after: datetime, timeout: int, tick=None):
-        """Chờ workbook có tiêu đề `title` và Export Date >= `after` xuất hiện"""
+    # ---------- Workbook do MES xuất ra ----------
+    def _books(self):
+        """
+        [(nguồn, workbook)] của MỌI cửa sổ WPS/Excel.
+        MES mở một WPS MỚI mỗi lần bấm Excel, còn GetActiveObject chỉ trả về 1 WPS → phải duyệt thêm
+        Running Object Table (ROT): mỗi workbook đang mở đăng ký một mục ('Workbook1', 'C:\\...\\file.xlsx').
+        """
+        res, seen = [], set()
+
+        def add(src, wb):
+            try:
+                key = wb.FullName
+            except pywintypes.com_error:
+                key = id(wb)
+            if key not in seen:
+                seen.add(key)
+                res.append((src, wb))
+
+        # 1. Workbook trong ROT — thấy được ở mọi tiến trình WPS
+        try:
+            rot = pythoncom.GetRunningObjectTable()
+            ctx = pythoncom.CreateBindCtx(0)
+            enum = rot.EnumRunning()
+            while True:
+                ms = enum.Next(1)
+                if not ms:
+                    break
+                try:
+                    name = ms[0].GetDisplayName(ctx, None)
+                    if name.startswith("!"):          # mục đăng ký của ứng dụng, không phải workbook
+                        continue
+                    obj = rot.GetObject(ms[0])
+                    wb = win32com.client.Dispatch(obj.QueryInterface(pythoncom.IID_IDispatch))
+                    wb.Worksheets            # chỉ nhận object là workbook
+                    add(f"ROT:{name[-40:]}", wb)
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log.info("Không đọc được ROT: %s", e)
+
+        # 2. Workbook của app đang đăng ký (cách cũ, phòng khi workbook không vào ROT)
+        for progid, app in self._apps():
+            try:
+                wbs = app.Workbooks
+                n = wbs.Count
+            except pywintypes.com_error:
+                continue
+            for i in range(1, n + 1):
+                try:
+                    add(progid, wbs.Item(i))
+                except pywintypes.com_error:
+                    pass
+        return res
+
+    @staticmethod
+    def _top_texts(wb) -> list[str]:
+        ws = wb.Worksheets.Item(1)
+        top = ws.Range("A1:J3").Value or ()
+        return [str(c) for row in top for c in row if c not in (None, "")]
+
+    def book_names(self) -> set:
+        names = set()
+        for _, wb in self._books():
+            try:
+                names.add(wb.FullName)
+            except pywintypes.com_error:
+                pass
+        return names
+
+    def close_stale(self, title: str) -> int:
+        """Đóng (không lưu) các bảng `title` còn sót từ lần chạy trước — tránh nhầm và làm WPS nặng"""
+        n = 0
+        for _, wb in self._books():
+            try:
+                # Chỉ bảng CHƯA LƯU do MES xuất (Path rỗng) — không đụng file người dùng đang mở
+                if not wb.Path and any(title.lower() in t.lower() for t in self._top_texts(wb)):
+                    name = wb.Name
+                    self.close(wb)
+                    n += 1
+                    self.log.info("Đóng bảng '%s' còn sót từ lần trước: %s", title, name)
+            except pywintypes.com_error as e:
+                self.log.info("Không đóng được một workbook cũ (đang bận?): %s", e)
+        return n
+
+    def wait_for_export(self, title: str, after: datetime, timeout: int, tick=None, before: set | None = None):
+        """
+        Chờ workbook có tiêu đề `title` xuất hiện:
+          - workbook MỚI (không có trong `before` = danh sách trước khi bấm Excel), hoặc
+          - Export Date >= `after`
+        Kiểm tra TỪNG workbook riêng (một cái bận/lỗi không chặn cái khác). Hết giờ → ghi rõ đã thấy gì.
+        """
         deadline = time.time() + timeout
+        seen = {}
         while time.time() < deadline:
             if tick:
                 tick()   # vd: đóng hộp thoại nâng cấp của MES
-            for progid, app in self._apps():
+            for progid, wb in self._books():
                 try:
-                    wbs = app.Workbooks
-                    for i in range(1, wbs.Count + 1):
-                        wb = wbs.Item(i)
-                        ws = wb.Worksheets.Item(1)
-                        top = ws.Range("A1:J3").Value or ()
-                        texts = [str(c) for row in top for c in row if c not in (None, "")]
-                        if not any(title.lower() in t.lower() for t in texts):
-                            continue
-                        export_dt = next((d for d in map(parse_export_date, texts) if d), None)
-                        if export_dt and export_dt >= after:
-                            self.log.info("Bắt được workbook '%s' qua %s, Export Date %s",
-                                          wb.Name, progid, export_dt)
-                            return wb, ws, export_dt
-                except pywintypes.com_error:
-                    pass   # app đang bận, vòng sau thử lại
+                    name = wb.FullName
+                    texts = self._top_texts(wb)
+                except pywintypes.com_error as e:
+                    seen[f"{progid}:?"] = f"đang bận/không đọc được ({e.args[1] if len(e.args) > 1 else e})"
+                    continue
+                is_new = before is not None and name not in before
+                seen[name] = f"{'MỚI' if is_new else 'cũ'} | {' / '.join(t[:40] for t in texts[:4]) or '(trống)'}"
+                if not any(title.lower() in t.lower() for t in texts):
+                    continue
+                export_dt = next((d for d in map(parse_export_date, texts) if d), None)
+                if is_new or (export_dt and export_dt >= after):
+                    export_dt = export_dt or datetime.now().replace(microsecond=0)
+                    self.log.info("Bắt được workbook '%s' qua %s (%s), Export Date %s",
+                                  wb.Name, progid, "mới" if is_new else "theo Export Date", export_dt)
+                    return wb, wb.Worksheets.Item(1), export_dt
             time.sleep(1)
+        self.log.warning("Workbook đã thấy trong lúc chờ: %s", seen or "không có")
         raise self.timeout_error(f"Không thấy bảng '{title}' mới", timeout)
 
     def wait_until_stable(self, ws, checks: int = 3, interval: float = 1.0, timeout: int = 120, tick=None):
@@ -179,8 +270,18 @@ class SheetBridge:
 
     def close(self, wb):
         name = wb.Name
+        try:
+            app = wb.Application
+        except pywintypes.com_error:
+            app = None
         com_retry(lambda: wb.Close(False))   # False = không lưu
         self.log.info("Đã đóng workbook %s (không lưu)", name)
+        # MES mở 1 WPS mới mỗi lần xuất → WPS không còn workbook nào thì tắt luôn cho nhẹ máy
+        try:
+            if app is not None and app.Workbooks.Count == 0:
+                app.Quit()
+        except Exception:
+            pass
 
     def _log_running_objects(self):
         """Debug: liệt kê mọi object COM đang đăng ký — giúp tìm ProgID đúng của WPS"""
@@ -202,11 +303,9 @@ class SheetBridge:
 # ---------- Dùng cho form không có dòng "Export Date" (vd: sản lượng) ----------
 def _workbooks(bridge: "SheetBridge") -> dict:
     res = {}
-    for _, app in bridge._apps():
+    for _, wb in bridge._books():
         try:
-            for i in range(1, app.Workbooks.Count + 1):
-                wb = app.Workbooks.Item(i)
-                res[wb.FullName] = wb
+            res[wb.FullName] = wb
         except pywintypes.com_error:
             pass
     return res

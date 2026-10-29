@@ -15,7 +15,7 @@ from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 from django.utils import timezone
 
-from apps.jobs.models import Job, JobRun, WorkerHeartbeat, next_cron_time
+from apps.jobs.models import Job, JobRun, WorkerStatus, next_cron_time
 from apps.jobs.runner import execute
 
 MISSED_GRACE = timedelta(hours=12)   # máy tắt lúc 8h, bật lúc 9h vẫn chạy bù; trễ quá 12h thì bỏ qua
@@ -35,7 +35,7 @@ class Command(BaseCommand):
         if n:
             self.stdout.write(self.style.WARNING(f"Đánh dấu {n} lần chạy dang dở là lỗi"))
 
-        WorkerHeartbeat.objects.update_or_create(pk=1, defaults={
+        WorkerStatus.objects.update_or_create(pk=1, defaults={
             "hostname": socket.gethostname(), "pid": os.getpid(),
             "started_at": now, "last_seen": now, "current_run": None})
         self.stdout.write(self.style.SUCCESS(f"Worker đã chạy (mỗi {interval}s). Ctrl+C để dừng."))
@@ -57,7 +57,7 @@ class Command(BaseCommand):
             self.stdout.write("Đã dừng worker.")
 
     def _beat(self, run):
-        WorkerHeartbeat.objects.filter(pk=1).update(last_seen=timezone.now(), current_run=run)
+        WorkerStatus.objects.filter(pk=1).update(last_seen=timezone.now(), current_run=run)
 
     def _schedule_due_jobs(self):
         now = timezone.now()

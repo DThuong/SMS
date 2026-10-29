@@ -6,15 +6,15 @@ from django.utils import timezone
 
 from apps.core.models import Oper, get_setting
 
-from .models import ExportFile, ProductionReport, WorkOrder
-from .services import production_target, register_production_file, save_export
+from .models import File, WorkOrder
+from .services import delete_file_on_disk, production_target, register_production_file, save_export
 
 
 def mes_config() -> dict:
-    """Cấu hình agent đọc từ bảng core_setting"""
+    """Cấu hình agent đọc từ bảng settings"""
     return {
         "view_wait": get_setting("mes_view_wait_seconds", 8),
-        "export_timeout": get_setting("mes_export_timeout_seconds", 90),
+        "export_timeout": get_setting("mes_export_timeout_seconds", 240),
         "auto_dismiss_upgrade": get_setting("mes_auto_dismiss_upgrade", True),
         "exe_path": get_setting("mes_exe_path", ""),
         "auto_start": get_setting("mes_auto_start", True),
@@ -58,9 +58,18 @@ def workorder_plan(run, log):
         raise
 
     total, errors, first_code = 0, [], None
+    exported = None          # (bảng MES xuất ra, Export Date) — dùng lại cho xưởng sau nếu đã có dữ liệu xưởng đó
     for oper in opers:
         try:
-            df, export_dt = collector.export_oper(oper.code)
+            if exported is not None and oper.code in collector.opers_in(exported[0]):
+                df_all, export_dt = exported
+                log.info("----- Oper %s: dùng lại bảng vừa xuất (đã có dữ liệu %s, không cần xuất lại) -----",
+                         oper.code, oper.code)
+            else:
+                df_all, export_dt = exported = collector.export_all(oper.code)
+            df = collector.split_oper(df_all, oper.code)
+            log.info("Oper %s %s: %d dòng (bảng xuất có %d dòng của các xưởng: %s)", oper.code, oper.name,
+                     len(df), len(df_all), ", ".join(sorted(collector.opers_in(df_all))) or "-")
             ef = save_export(run, oper, df, export_dt)
             log.info("Đã lưu %s (%d dòng) vào file + DB", ef.file_path, ef.rows)
             total += ef.rows
@@ -123,28 +132,18 @@ def production_output(run, log):
 
 
 def cleanup(run, log):
-    """Xóa file và dữ liệu WO quá hạn lưu trữ"""
+    """Xóa file (giữ dòng trong bảng files), dòng work_orders và ảnh lỗi quá hạn lưu trữ"""
     now = timezone.now()
     file_days = get_setting("file_retention_days", 30)
     wo_days = get_setting("workorder_retention_days", 90)
 
     n_files = 0
-    for ef in ExportFile.objects.filter(created_at__lt=now - timedelta(days=file_days)).exclude(
-            status=ExportFile.Status.DELETED):
-        p = settings.STORAGE_DIR / ef.file_path
-        if p.exists():
-            p.unlink()
-        ef.status = ExportFile.Status.DELETED
-        ef.save(update_fields=["status"])
-        n_files += 1
-    for rp in ProductionReport.objects.filter(created_at__lt=now - timedelta(days=file_days), file_deleted=False):
-        (settings.STORAGE_DIR / rp.file_path).unlink(missing_ok=True)
-        rp.file_deleted = True
-        rp.save(update_fields=["file_deleted"])
+    for f in File.objects.filter(created_at__lt=now - timedelta(days=file_days), file_deleted=False):
+        delete_file_on_disk(f)
         n_files += 1
     log.info("Đã xóa %d file cũ hơn %d ngày", n_files, file_days)
 
-    n_wo, _ = WorkOrder.objects.filter(export_file__export_date__lt=now - timedelta(days=wo_days)).delete()
+    n_wo, _ = WorkOrder.objects.filter(file__export_date__lt=now - timedelta(days=wo_days)).delete()
     log.info("Đã xóa %d dòng Work Order cũ hơn %d ngày", n_wo, wo_days)
 
     n_shots = 0

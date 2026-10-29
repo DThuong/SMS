@@ -1,4 +1,4 @@
-"""API: đăng nhập, xưởng (Oper), cài đặt, dashboard"""
+"""API: sức khỏe, xưởng (bảng opers), cài đặt (bảng settings), dashboard"""
 from datetime import timedelta
 
 from django.db.models import Count, Sum
@@ -49,19 +49,21 @@ def create_oper(request, data: OperIn):
     return Oper.objects.create(**data.dict())
 
 
-@router.put("/opers/{oper_id}", response=OperOut, tags=["Oper"])
-def update_oper(request, oper_id: int, data: OperIn):
-    oper = get_object_or_404(Oper, id=oper_id)
+@router.put("/opers/{code}", response=OperOut, tags=["Oper"])
+def update_oper(request, code: str, data: OperIn):
+    oper = get_object_or_404(Oper, code=code)
+    if data.code != code and Oper.objects.filter(code=data.code).exists():
+        raise HttpError(400, f"Mã Oper {data.code} đã tồn tại")
     for k, v in data.dict().items():
         setattr(oper, k, v)
     oper.save()
     return oper
 
 
-@router.delete("/opers/{oper_id}", tags=["Oper"])
-def delete_oper(request, oper_id: int):
-    oper = get_object_or_404(Oper, id=oper_id)
-    if oper.export_files.exists():
+@router.delete("/opers/{code}", tags=["Oper"])
+def delete_oper(request, code: str):
+    oper = get_object_or_404(Oper, code=code)
+    if oper.files.exists():
         raise HttpError(400, "Xưởng đã có dữ liệu — hãy tắt 'Đang dùng' thay vì xóa")
     oper.delete()
     return {"ok": True}
@@ -112,65 +114,41 @@ def update_setting(request, key: str, data: SettingIn):
 # ---------------- Dashboard ----------------
 @router.get("/dashboard", tags=["Dashboard"])
 def dashboard(request):
-    from apps.jobs.models import Job, JobRun, WorkerHeartbeat
-    from apps.plans.models import ExportFile, ProductionReport
+    from apps.jobs.api import _job_out, _run_out
+    from apps.jobs.models import Job, JobRun, WorkerStatus
+    from apps.plans.api import file_out
+    from apps.plans.models import File
 
     now = timezone.localtime()
     today = now.date()
+    workorders = File.objects.filter(kind=File.Kind.WORKORDER)
 
-    jobs = []
-    for job in Job.objects.all():
-        last = job.runs.order_by("-id").first()
-        jobs.append({
-            "id": job.id, "code": job.code, "name": job.name, "is_active": job.is_active,
-            "cron": job.cron, "next_run_at": job.next_run_at,
-            "last_run": None if not last else {
-                "id": last.id, "status": last.status, "started_at": last.started_at,
-                "finished_at": last.finished_at, "rows_total": last.rows_total,
-            },
-        })
-
-    # Số dòng kế hoạch lấy được hôm nay theo xưởng (lấy file mới nhất trong ngày)
+    # Số dòng kế hoạch lấy được hôm nay theo xưởng (file mới nhất trong ngày)
     today_by_oper = []
     for oper in Oper.objects.filter(is_active=True):
-        f = (ExportFile.objects.filter(oper=oper, export_date__date=today)
-             .order_by("-export_date").first())
+        f = workorders.filter(oper=oper, export_date__date=today).order_by("-export_date").first()
         today_by_oper.append({"oper": oper.code, "name": oper.name,
-                              "rows": f.rows if f else 0,
-                              "export_date": f.export_date if f else None})
+                              "rows": f.rows if f else 0, "export_date": f.export_date if f else None})
 
     since = today - timedelta(days=13)
-    daily = (ExportFile.objects.filter(export_date__date__gte=since)
+    daily = (workorders.filter(export_date__date__gte=since)
              .annotate(day=TruncDate("export_date"))
              .values("day", "oper__code").annotate(rows=Sum("rows")).order_by("day"))
 
-    week_ago = now - timedelta(days=7)
-    runs_7d = (JobRun.objects.filter(created_at__gte=week_ago)
+    runs_7d = (JobRun.objects.filter(created_at__gte=now - timedelta(days=7))
                .values("status").annotate(n=Count("id")))
 
-    hb = WorkerHeartbeat.objects.filter(pk=1).first()
-    worker = {
-        "online": bool(hb and (now - hb.last_seen).total_seconds() < 60),
-        "last_seen": hb.last_seen if hb else None,
-        "hostname": hb.hostname if hb else "",
-        "current_run_id": hb.current_run_id if hb else None,
-    }
-
-    pr = ProductionReport.objects.filter(report_date=today).order_by("-id").first()
-    production_today = None if not pr else {
-        "id": pr.id, "rows": pr.rows, "status": pr.status, "status_label": pr.get_status_display(),
-        "export_date": pr.export_date, "imported_at": pr.imported_at}
-
-    recent = JobRun.objects.select_related("job").order_by("-id")[:8]
+    ws = WorkerStatus.objects.filter(pk=1).first()
+    production_today = (File.objects.filter(kind=File.Kind.PRODUCTION, report_date=today)
+                        .order_by("-id").first())
     return {
         "now": now,
-        "worker": worker,
-        "jobs": jobs,
+        "worker": {"online": WorkerStatus.is_online(), "last_seen": ws.last_seen if ws else None,
+                   "hostname": ws.hostname if ws else "", "current_run_id": ws.current_run_id if ws else None},
+        "jobs": [_job_out(j) for j in Job.objects.all()],
         "today_by_oper": today_by_oper,
-        "production_today": production_today,
+        "production_today": file_out(production_today) if production_today else None,
         "daily": [{"day": d["day"].isoformat(), "oper": d["oper__code"], "rows": d["rows"]} for d in daily],
         "runs_7d": {r["status"]: r["n"] for r in runs_7d},
-        "recent_runs": [{"id": r.id, "job": r.job.name, "status": r.status, "trigger": r.trigger,
-                         "requested_by": r.requested_by, "error_code": r.error_code,
-                         "created_at": r.created_at, "rows_total": r.rows_total} for r in recent],
+        "recent_runs": [_run_out(r) for r in JobRun.objects.select_related("job").order_by("-id")[:8]],
     }

@@ -11,7 +11,7 @@ SPREADSHEET_PROGIDS = ("Ket.Application", "Excel.Application", "KET.Application"
 
 DEFAULT_CONFIG = {
     "view_wait": 8,                 # chờ MES tải dữ liệu sau khi bấm View (giây)
-    "export_timeout": 90,           # chờ WPS nhận dữ liệu sau khi bấm Excel (giây)
+    "export_timeout": 240,          # chờ WPS nhận dữ liệu sau khi bấm Excel (giây)
     "auto_dismiss_upgrade": True,   # tự bấm No ở hộp thoại hỏi nâng cấp
     "exe_path": "",                 # đường dẫn MESClient.exe để tự mở
     "auto_start": True,
@@ -36,9 +36,23 @@ class BaseCollector:
         progid = self.sheets.check_available()
         self.log.info("Máy agent có bảng tính COM: %s", progid)
         self.mes.connect(self.cfg["exe_path"], self.cfg["auto_start"], self.cfg["start_timeout"])
+        self._remember_exe_path()
         self.mes.handle_popup()
         self.mes.ensure_logged_in(self.cfg["user_id"], self.cfg["password"], self.cfg["login_timeout"])
         self.mes.handle_popup()
+
+    def _remember_exe_path(self):
+        """Cấu hình mes_exe_path sai/khác với MESClient đang chạy → lưu đường dẫn thật để lần sau tự mở được"""
+        found = self.mes.exe_found
+        if not found or Path(found) == Path(self.cfg["exe_path"] or "."):
+            return
+        try:
+            from apps.core.models import Setting
+            Setting.objects.filter(key="mes_exe_path").update(value=found)
+            self.cfg["exe_path"] = found
+            self.log.info("Đã cập nhật đường dẫn MESClient.exe trong cài đặt: %s", found)
+        except Exception as e:
+            self.log.info("Không lưu được đường dẫn MESClient.exe (%s): %s", found, e)
 
     def screenshot(self, path: Path):
         self.mes.screenshot(path)

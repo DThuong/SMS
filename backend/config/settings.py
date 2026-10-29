@@ -17,7 +17,7 @@ def _csv(name: str, default: str = "") -> list[str]:
 ALLOWED_HOSTS = _csv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
 # CORS: các trang web được phép gọi API này từ trình duyệt (DYS)
 CORS_ALLOWED_ORIGINS = _csv("CORS_ALLOWED_ORIGINS", "https://dys.dongyang.site,http://localhost:3000")
-CORS_ALLOW_HEADERS = ["accept", "content-type", "x-api-password", "x-requested-by"]
+CORS_ALLOW_HEADERS = ["accept", "content-type", "x-api-key", "x-requested-by"]
 CORS_EXPOSE_HEADERS = ["content-disposition"]   # để DYS đọc được tên file khi tải
 
 # Chạy sau Cloudflare (HTTPS ở Cloudflare, vào container là HTTP): tin header X-Forwarded-Proto
