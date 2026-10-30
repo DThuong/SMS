@@ -77,8 +77,16 @@ class SheetBridge:
                 return pid
             except pywintypes.com_error:
                 pass
-        raise SheetError("Máy agent chưa cài WPS Spreadsheets / Excel (không có ProgID COM: "
-                         + ", ".join(self.progids) + ")", "SHEET_APP_MISSING")
+        msg = "Máy agent chưa cài WPS Spreadsheets / Excel (không có ProgID COM: " + ", ".join(self.progids) + ")"
+        try:
+            import ctypes
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                # WPS đăng ký COM theo người dùng (HKCU) — Windows bỏ qua đăng ký này với tiến trình chạy quyền Admin
+                msg = ("Worker đang chạy bằng quyền Administrator nên không thấy WPS (WPS đăng ký COM theo người dùng, "
+                       "Windows bỏ qua với tiến trình Admin). Chạy worker bằng quyền thường: Task Scheduler dùng /RL LIMITED")
+        except Exception:
+            pass
+        raise SheetError(msg, "SHEET_APP_MISSING")
 
     def timeout_error(self, what: str, timeout: int) -> SheetError:
         """Phân biệt: WPS có mở nhưng không gắn COM được, hay MES không xuất gì"""

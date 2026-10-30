@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from croniter import croniter
 from django.db import models
@@ -9,6 +9,16 @@ def next_cron_time(cron: str, base: datetime | None = None) -> datetime:
     """Thời điểm chạy kế tiếp theo biểu thức cron, tính theo giờ Việt Nam"""
     base = timezone.localtime(base or timezone.now())
     return croniter(cron, base).get_next(datetime)
+
+
+def cron_period(cron: str, base: datetime | None = None) -> tuple[datetime, datetime]:
+    """
+    Kỳ hiện tại của lịch cron: [lần hẹn gần nhất, lần hẹn kế tiếp).
+    Vd cron "0 8 * * *", lúc 15:00 ngày 30 → [30/10 08:00, 31/10 08:00); lúc 03:00 ngày 31 → vẫn kỳ đó.
+    """
+    base = timezone.localtime(base or timezone.now())
+    start = croniter(cron, base + timedelta(seconds=1)).get_prev(datetime)   # +1s: đúng 08:00:00 tính là kỳ mới
+    return start, croniter(cron, start).get_next(datetime)
 
 
 class Job(models.Model):
@@ -35,6 +45,12 @@ class Job(models.Model):
 
     def __str__(self):
         return self.name
+
+    def scheduled_run_in_period(self, base: datetime | None = None):
+        """Lần chạy TỰ ĐỘNG (trigger=schedule) của kỳ hiện tại, hoặc None nếu kỳ này chưa chạy"""
+        start, _ = cron_period(self.cron, base)
+        return (self.runs.filter(trigger=JobRun.Trigger.SCHEDULE, created_at__gte=start)
+                .order_by("id").first())
 
     def save(self, *args, **kwargs):
         # Mỗi lần lưu (đổi lịch / bật tắt) thì tính lại lần chạy kế tiếp

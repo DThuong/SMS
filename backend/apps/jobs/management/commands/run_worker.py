@@ -2,23 +2,24 @@
 Worker chạy nền — PHẢI chạy trong phiên Windows đang đăng nhập (UI Automation cần desktop).
 Mỗi vòng lặp (mặc định 5 giây):
   1. Cập nhật heartbeat
-  2. Job nào tới giờ theo cron -> tạo JobRun (trigger=schedule)
+  2. Lịch tự động theo KỲ: mỗi job đang bật phải có đúng 1 lần chạy tự động trong mỗi kỳ cron
+     (vd "0 8 * * *": từ 08:00 hôm nay tới 08:00 hôm sau). Kỳ này chưa có → tạo ngay, kể cả khi máy
+     bật trễ (9h, 15h, 3h sáng hôm sau...). Đã có (thành công hay lỗi) → không tạo thêm; chạy lại thì gọi API.
   3. Lấy JobRun đang chờ (queued) cũ nhất -> chạy. Chỉ 1 job chạy tại một thời điểm.
 Dừng: Ctrl+C
 """
 import os
 import socket
 import time
-from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 from django.utils import timezone
 
-from apps.jobs.models import Job, JobRun, WorkerStatus, next_cron_time
+from apps.jobs.models import Job, JobRun, WorkerStatus, cron_period
 from apps.jobs.runner import execute
 
-MISSED_GRACE = timedelta(hours=12)   # máy tắt lúc 8h, bật lúc 9h vẫn chạy bù; trễ quá 12h thì bỏ qua
+PENDING = [JobRun.Status.QUEUED, JobRun.Status.RUNNING]
 
 
 class Command(BaseCommand):
@@ -60,13 +61,22 @@ class Command(BaseCommand):
         WorkerStatus.objects.filter(pk=1).update(last_seen=timezone.now(), current_run=run)
 
     def _schedule_due_jobs(self):
+        """Mỗi job đang bật: kỳ hiện tại chưa có lần chạy tự động → tạo đúng 1 lần"""
         now = timezone.now()
-        for job in Job.objects.filter(is_active=True, next_run_at__lte=now):
-            if now - job.next_run_at <= MISSED_GRACE:
-                # Không tạo trùng nếu job này đã có lần chạy đang chờ
-                if not job.runs.filter(status__in=[JobRun.Status.QUEUED, JobRun.Status.RUNNING]).exists():
-                    JobRun.objects.create(job=job, trigger=JobRun.Trigger.SCHEDULE, params=job.params)
-                    self.stdout.write(f"Đến giờ chạy: {job.code}")
-            else:
-                self.stdout.write(self.style.WARNING(f"Bỏ qua lịch quá hạn của {job.code} ({job.next_run_at})"))
-            Job.objects.filter(pk=job.pk).update(next_run_at=next_cron_time(job.cron, now))
+        for job in Job.objects.filter(is_active=True):
+            start, end = cron_period(job.cron, now)
+            if job.next_run_at != end:
+                Job.objects.filter(pk=job.pk).update(next_run_at=end)
+            if job.scheduled_run_in_period(now):
+                continue                                   # kỳ này đã chạy tự động rồi
+            if job.runs.filter(status__in=PENDING).exists():
+                continue                                   # đang có lần chạy tay dở dang → chờ xong rồi xếp lịch
+            params = dict(job.params or {})
+            params["scheduled_for"] = start.isoformat()
+            if job.code == "PRODUCTION_OUTPUT":
+                # Chạy bù sau nửa đêm vẫn lấy đúng ngày của kỳ (vd kỳ 30/10 08:00, chạy lúc 02:00 ngày 31 → lấy 30/10)
+                params.setdefault("report_date", start.date().isoformat())
+            JobRun.objects.create(job=job, trigger=JobRun.Trigger.SCHEDULE, params=params)
+            late = (timezone.localtime(now) - start).total_seconds() / 60
+            self.stdout.write(f"Đến giờ chạy: {job.code} (kỳ {start:%d/%m %H:%M} → {end:%d/%m %H:%M}"
+                              + (f", chạy bù trễ {late:.0f} phút)" if late >= 1 else ")"))

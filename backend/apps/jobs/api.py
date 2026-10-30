@@ -33,7 +33,7 @@ from ninja.errors import HttpError
 from apps.collector.errors import error_info
 from apps.core.security import requested_by
 
-from .models import Job, JobRun, WorkerStatus
+from .models import Job, JobRun, WorkerStatus, cron_period
 
 router = Router(tags=["Job"])
 
@@ -51,7 +51,18 @@ def _job_out(job: Job) -> dict:
         "last_run": None if not last else {"id": last.id, "status": last.status, "rows_total": last.rows_total,
                                            "finished_at": last.finished_at},
         "running": job.runs.filter(status__in=PENDING).exists(),
+        "period": _period_out(job),
     }
+
+
+def _period_out(job: Job) -> dict:
+    """Kỳ lịch hiện tại (vd 08:00 hôm nay → 08:00 hôm sau) và lần chạy tự động của kỳ đó"""
+    start, end = cron_period(job.cron)
+    sr = job.scheduled_run_in_period()
+    return {"start": start, "end": end,
+            "scheduled_run": None if not sr else {"id": sr.id, "status": sr.status,
+                                                  "status_label": sr.get_status_display(),
+                                                  "created_at": sr.created_at, "finished_at": sr.finished_at}}
 
 
 @router.get("/jobs")
