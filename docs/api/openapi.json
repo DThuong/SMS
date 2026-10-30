@@ -92,6 +92,160 @@
         ]
       }
     },
+    "/api/plants": {
+      "get": {
+        "operationId": "apps_core_api_list_plants",
+        "summary": "Danh sách nhà máy (Plant)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlantOut"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "description": "Plant chọn ở màn hình View Work Order của MES (PL10 SMPS PLANT, PL20 TV BOARD PLANT...)",
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "apps_core_api_create_plant",
+        "summary": "Thêm plant",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlantOut"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlantIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/plants/{code}": {
+      "put": {
+        "operationId": "apps_core_api_update_plant",
+        "summary": "Sửa plant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlantOut"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlantIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "apps_core_api_delete_plant",
+        "summary": "Xóa plant (chưa có file)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
     "/api/opers": {
       "get": {
         "operationId": "apps_core_api_list_opers",
@@ -477,7 +631,7 @@
     "/api/jobs/{code}/run": {
       "post": {
         "operationId": "apps_jobs_api_run_job",
-        "summary": "Chạy job ngay (sản lượng theo ngày / khoảng ngày, kế hoạch theo xưởng)",
+        "summary": "Chạy job ngay (sản lượng theo ngày / khoảng ngày; kế hoạch theo plant, Period, xưởng)",
         "parameters": [
           {
             "in": "path",
@@ -859,6 +1013,22 @@
           },
           {
             "in": "query",
+            "name": "plant",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Plant"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
             "name": "oper",
             "schema": {
               "anyOf": [
@@ -1012,7 +1182,7 @@
       },
       "delete": {
         "operationId": "apps_plans_api_delete_file",
-        "summary": "Xóa file trên ổ đĩa (with_data: xóa cả dòng)",
+        "summary": "Xóa file trên ổ đĩa + dòng trong bảng files",
         "parameters": [
           {
             "in": "path",
@@ -1027,7 +1197,7 @@
             "in": "query",
             "name": "with_data",
             "schema": {
-              "default": false,
+              "default": true,
               "title": "With Data",
               "type": "boolean"
             },
@@ -1039,7 +1209,7 @@
             "description": "OK"
           }
         },
-        "description": "Xóa file trên ổ đĩa; with_data=true thì xóa luôn dòng trong bảng files",
+        "description": "Xóa file trên ổ đĩa và dòng trong bảng files (tham số with_data giữ để tương thích, luôn xóa cả hai)",
         "tags": [
           "File từ MES"
         ],
@@ -1107,7 +1277,7 @@
             "description": "OK"
           }
         },
-        "description": "DYS báo kết quả import file (sản lượng hoặc kế hoạch) → thành công thì xóa file nếu bật delete_file_after_import",
+        "description": "DYS báo kết quả import file (sản lượng hoặc kế hoạch).\nThành công + bật delete_file_after_import → xóa file trên máy VÀ dòng trong bảng files (`deleted: true`).",
         "tags": [
           "File từ MES"
         ],
@@ -1150,6 +1320,87 @@
           "api_key"
         ],
         "title": "SessionIn",
+        "type": "object"
+      },
+      "PlantOut": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "is_default": {
+            "default": false,
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "sort_order": {
+            "default": 0,
+            "title": "Sort Order",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "id"
+        ],
+        "title": "PlantOut",
+        "type": "object"
+      },
+      "PlantIn": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "is_default": {
+            "default": false,
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "sort_order": {
+            "default": 0,
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name"
+        ],
+        "title": "PlantIn",
         "type": "object"
       },
       "OperOut": {
@@ -1359,6 +1610,17 @@
             ],
             "title": "Date To"
           },
+          "plant": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plant"
+          },
           "opers": {
             "anyOf": [
               {
@@ -1534,6 +1796,17 @@
               }
             ]
           },
+          "plant": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plant"
+          },
           "oper": {
             "anyOf": [
               {
@@ -1649,16 +1922,7 @@
       }
     }
   },
-  "servers": [
-    {
-      "url": "https://sms-backend.dongyang.site",
-      "description": "Cloudflare (HTTPS)"
-    },
-    {
-      "url": "http://172.16.162.60:8000",
-      "description": "LAN máy MES"
-    }
-  ],
+  "servers": [],
   "tags": [
     {
       "name": "Phiên & sức khỏe"

@@ -218,6 +218,7 @@ export interface SmsFile {
   rows: number;
   status: "saved" | "imported" | "import_failed";
   file_deleted: boolean;
+  deleted?: boolean;          // chỉ có ở kết quả import-result: true = SMS đã xóa file + dòng
   download_url: string | null;
 }
 

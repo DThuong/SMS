@@ -11,7 +11,7 @@ Trình duyệt DYS ──Bearer token────► https://sms-backend.dongyan
                                     │ Windows: worker ── điều khiển MESClient + WPS     │
                                     └───────────────────────────────────────────────────┘
 DYS tải file sản lượng từ SMS → tự gọi POST /api/ProductionResult/import của DYS bằng token người dùng
-    → báo kết quả lại SMS (POST /api/files/{id}/import-result) → SMS xóa file.
+    → báo kết quả lại SMS (POST /api/files/{id}/import-result) → SMS xóa file + dòng trong bảng files.
 ```
 - **api** (Docker): nhận lệnh, trả trạng thái, lịch sử, file.
 - **worker / agent** (chạy thẳng trên Windows — KHÔNG chạy được trong Docker vì cần desktop để điều khiển MESClient):
@@ -20,7 +20,7 @@ DYS tải file sản lượng từ SMS → tự gọi POST /api/ProductionResult
 
 ```
 backend/
-├─ apps/core          Bảng api_keys, settings, opers — /api/health, /api/dashboard, /api/opers, /api/settings
+├─ apps/core          Bảng api_keys, settings, plants, opers — /api/health, /api/dashboard, /api/plants, /api/opers, /api/settings
 ├─ apps/jobs          Bảng jobs, job_runs, job_logs, worker_status — /api/jobs, /api/runs, worker
 ├─ apps/plans         Bảng files — /api/files (DYS tải file về import vào DB của DYS)
 ├─ apps/collector     Agent điều khiển MESClient (pywinauto + COM) — chỉ chạy trên Windows
@@ -123,12 +123,12 @@ và file kế hoạch **cũ hơn `data_retention_days` ngày (mặc định 3)**
 | Phiên | `POST /api/auth/session` (`api_key` + `username` → token 15 phút, mỗi khóa 1 phiên), `GET /api/auth/session` (thời gian còn lại), `DELETE /api/auth/session` (đăng xuất) |
 | Hạn lưu dữ liệu | `GET /api/retention`, `PUT /api/retention` (`days`) |
 | Tổng quan | `GET /api/dashboard` — worker sống không, job, kế hoạch hôm nay theo xưởng, file sản lượng hôm nay, lần chạy gần đây |
-| Job | `GET /api/jobs`, `PUT /api/jobs/{code}` (`cron`, `is_active`, `params`), `POST /api/jobs/{code}/run` (`report_date` hoặc `date_from`+`date_to` tối đa 31 ngày — mỗi ngày 1 file, `opers`, `wait_seconds`) |
+| Job | `GET /api/jobs`, `PUT /api/jobs/{code}` (`cron`, `is_active`, `params`), `POST /api/jobs/{code}/run` — sản lượng: `report_date` hoặc `date_from`+`date_to` tối đa 31 ngày (mỗi ngày 1 file); kế hoạch WO: `plant`, `date_from`+`date_to` (Period, tối đa 62 ngày, được chọn ngày tương lai), `opers`; chung: `wait_seconds` |
 | Hàng chờ | `GET /api/queue` — lần đang chạy + các lần chờ theo thứ tự bấm (ai bấm trước chạy trước) |
 | Lần chạy | `GET /api/runs?job=&status=&date_from=&date_to=`, `GET /api/runs/{id}` (trạng thái + `error_info` + `logs` + `files`), `GET /api/runs/{id}/logs?after_seq=`, `GET /api/runs/{id}/logs/{seq}/screenshot` |
 | Xóa lịch sử chạy | `DELETE /api/runs/{id}` (đang chờ/chạy → 409), `POST /api/runs/delete` `{"ids": [..]}` hoặc bộ lọc `job/status/date_from/date_to` hoặc `{"all": true}` — xóa kèm nhật ký + ảnh lỗi, giữ file MES |
-| File | `GET /api/files?kind=workorder\|production&oper=&report_date=&status=`, `GET /api/files/{id}`, `GET /api/files/{id}/download`, `POST /api/files/{id}/import-result`, `DELETE /api/files/{id}?with_data=` |
-| Cài đặt | `GET/POST /api/opers`, `PUT/DELETE /api/opers/{code}`, `GET /api/settings`, `PUT /api/settings/{key}` (mật khẩu MES trả về `******`) |
+| File | `GET /api/files?kind=workorder\|production&plant=&oper=&report_date=&status=`, `GET /api/files/{id}`, `GET /api/files/{id}/download`, `POST /api/files/{id}/import-result`, `DELETE /api/files/{id}` (xóa file + dòng). File không còn trong storage thì dòng `files` tự bị xóa khi gọi danh sách/chi tiết/tải |
+| Cài đặt | `GET/POST /api/plants`, `PUT/DELETE /api/plants/{code}`, `GET/POST /api/opers`, `PUT/DELETE /api/opers/{code}`, `GET /api/settings`, `PUT /api/settings/{key}` (mật khẩu MES trả về `******`) |
 
 Mã job: `PRODUCTION_OUTPUT` (sản lượng), `WORKORDER_PLAN` (kế hoạch WO), `CLEANUP` (dọn file cũ).
 
@@ -139,20 +139,36 @@ Mã job: `PRODUCTION_OUTPUT` (sản lượng), `WORKORDER_PLAN` (kế hoạch WO
 3. `status = success` → `files[0].download_url` → tải file (.xlsx).
 4. DYS gọi `POST /api/ProductionResult/import?reportDate=...` (của DYS) với file + token người dùng.
 5. Báo lại: `POST /api/files/{files[0].id}/import-result` `{ "success": true, "message": "..." }`
-   → SMS ghi nhận, xóa file nếu bật `delete_file_after_import`.
+   → bật `delete_file_after_import` (mặc định): SMS xóa file **và dòng trong bảng `files`** (`deleted: true`); import lỗi thì giữ lại để thử lại.
+
+### Luồng kế hoạch Work Order
+Agent làm đúng như thao tác tay trên MES: menu `[PM]Production Management → Process Control → Work Order Management →
+View Work Order` → **Plant** (vd `PL20 TV BOARD PLANT`) → ô kỳ chọn **Period** → **từ ngày ~ đến ngày** → **Oper**
+(`2010` SMD, `3010` MAIN...) → **View** → **Excel** (MES đổ sang WPS) → đọc bảng → lưu
+`storage/KeHoach/<PLANT>/<XƯỞNG>/<từ>-<đến>_<giờ xuất>.xlsx` (sheet `WorkOrder` + `Info`). Mỗi xưởng chọn lại Oper và xuất 1 lần.
+1. `POST /api/jobs/WORKORDER_PLAN/run` `{ "plant": "PL20", "date_from": "2026-10-26", "date_to": "2026-11-01", "opers": ["2010", "3010"], "wait_seconds": 90 }`
+   - `plant`: mã plant đang dùng (`GET /api/plants`); bỏ trống = plant mặc định (`is_default`, PL20)
+   - `date_from` / `date_to`: Period trên MES (tối đa 62 ngày, được chọn ngày tương lai); bỏ trống = hôm nay − `workorder_period_days_before` (0) → hôm nay + `workorder_period_days_after` (7); lịch 08:00 cũng dùng cách này
+   - `opers`: các xưởng đang dùng (`GET /api/opers`); bỏ trống = mọi xưởng đang dùng
+   - SMS **chốt đủ 4 điều kiện ngay khi tạo lần chạy**: `params` trả về luôn có `plant`, `period_from`, `period_to`, `opers` — hiển thị cho người bấm xác nhận
+   - Mã sai/tắt, từ > đến, quá 62 ngày → 400
+2. Chờ `finished = true` như luồng sản lượng → `files[]` mỗi xưởng 1 file (có `plant`, `oper`, `period_from`, `period_to`) → DYS tải về import → `POST /api/files/{id}/import-result`.
+3. Kiểm tra trước trên máy MES (không bấm View): `python manage.py mes_diag workorder 2026-10-26 2026-11-01 --plant PL20 --oper 2010` → ảnh từng bước trong `storage/probe/`.
 
 ### Mã lỗi (`error_info.code`)
 `MES_NOT_RUNNING`, `MES_START_FAILED`, `MES_LOGIN_REQUIRED`, `MES_LOGIN_FAILED`, `MES_POPUP_BLOCKING`,
-`MES_MENU_NOT_FOUND`, `MES_FORM_NOT_FOUND`, `MES_CONTROL_NOT_FOUND`, `MES_DATE_SET_FAILED`,
+`MES_MENU_NOT_FOUND`, `MES_FORM_NOT_FOUND`, `MES_CONTROL_NOT_FOUND`, `MES_DATE_SET_FAILED`, `MES_CODE_SELECT_FAILED`,
+`MES_BUSY_TIMEOUT`, `MES_DATA_MISMATCH`,
 `SHEET_APP_MISSING`, `SHEET_COM_ATTACH_FAILED`, `SHEET_EXPORT_TIMEOUT`, `SHEET_DATA_UNSTABLE`, `SHEET_READ_FAILED`,
 `AGENT_NOT_WINDOWS`, `INVALID_PARAMS`, `UNKNOWN` — tiêu đề + cách xử lý trong `apps/collector/errors.py`.
 
-## 7. Database (MySQL `sms`) — 8 bảng
+## 7. Database (MySQL `sms`) — 9 bảng
 ```
 jobs ──1:n──► job_runs ──1:n──► job_logs
                  │
                  └──1:n──► files
-                              ▲ (file workorder thuộc 1 xưởng)
+                              ▲ (file workorder thuộc 1 plant + 1 xưởng)
+plants ───────────────────────┤
 opers ────────────────────────┘
 api_keys, settings, worker_status: bảng độc lập
 ```
@@ -160,12 +176,13 @@ api_keys, settings, worker_status: bảng độc lập
 |---|---|---|
 | `api_keys` | API key (SHA-256), cấp cho ai, số lần dùng | Admin; tăng `use_count` mỗi lần tạo phiên |
 | `settings` | Tài khoản MES (mật khẩu bí mật), đường dẫn MESClient.exe, thời gian chờ, số ngày giữ dữ liệu (`data_retention_days`), thời lượng phiên (`session_minutes`) | `seed`, `PUT /api/settings/{key}` |
-| `opers` | Xưởng cần lấy kế hoạch WO | `seed`, `/api/opers` |
+| `plants` | Nhà máy chọn ở ô Plant của View Work Order: `PL10` SMPS PLANT, `PL20` TV BOARD PLANT (mặc định) | migration/`seed`, `/api/plants` |
+| `opers` | Xưởng cần lấy kế hoạch WO (2010 SMD, 3010 MAINLINE bật sẵn; 1010, 1020, 1030, 2001, 3050 tắt sẵn) | `seed`, `/api/opers` |
 | `jobs` | **Định nghĩa** job + lịch cron (3 dòng cố định) | `seed`, `PUT /api/jobs/{code}` |
 | `job_runs` | **Mỗi lần chạy**: ai yêu cầu, tham số, trạng thái, số dòng, mã lỗi | API tạo (`queued`), worker cập nhật |
 | `job_logs` | **Nhật ký từng bước** của một lần chạy (+ ảnh lỗi) | Worker (mỗi dòng log) |
 | `worker_status` | 1 dòng: worker còn sống không, đang chạy lần nào | Worker mỗi 5 giây |
-| `files` | Mọi file lấy từ MES: `kind=workorder` (theo xưởng) hoặc `kind=production` (theo ngày, kèm kết quả DYS import) | Worker tạo; `import-result` cập nhật |
+| `files` | Mọi file lấy từ MES: `kind=workorder` (theo plant + xưởng + kỳ `period_from`..`period_to`) hoặc `kind=production` (theo ngày, kèm kết quả DYS import) | Worker tạo; `import-result` cập nhật/xóa. Chỉ giữ dòng khi file còn trong storage |
 
 ## 8. Thêm một loại job mới
 1. Viết hàm `handler(run, log)` trả về số dòng (hoặc `(số dòng, [lỗi])`); ném `AgentError(msg, "MA_LOI")` để có mã lỗi
