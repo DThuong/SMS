@@ -72,7 +72,10 @@ pip install -r requirements.txt
 python manage.py mes_check      &REM kiểm tra: có WPS, mở được MES, đăng nhập được
 python manage.py run_worker     &REM chạy nền
 ```
-Tự chạy khi đăng nhập Windows: Task Scheduler → *At log on* → `backend\scripts\run_worker.bat` → *Run only when user is logged on*.
+Tự chạy khi đăng nhập Windows (chạy 1 lần, PowerShell *Run as Administrator*):
+`powershell -ExecutionPolicy Bypass -File C:\SCAN_MES\SMS\backend\scripts\install_worker_task.ps1`
+→ task **SMS Worker**: chạy lúc đăng nhập, quyền thường (để thấy WPS), không giới hạn thời gian, tự bật lại khi bị dừng;
+`run_worker.bat` tự chạy lại worker sau 15 giây nếu worker thoát. Dừng: `Stop-ScheduledTask "SMS Worker"`; gỡ: `Unregister-ScheduledTask "SMS Worker" -Confirm:$false`.
 
 Lệnh khác: `run_job PRODUCTION_OUTPUT`, `probe_form "<tiêu đề form>" --export`,
 `api_key add "Tên"` / `api_key list` / `api_key disable <id>` / `api_key enable <id>`.
@@ -148,7 +151,7 @@ View Work Order` → **Plant** (vd `PL20 TV BOARD PLANT`) → ô kỳ chọn **P
 `storage/KeHoach/<PLANT>/<XƯỞNG>/<từ>-<đến>_<giờ xuất>.xlsx` (sheet `WorkOrder` + `Info`). Mỗi xưởng chọn lại Oper và xuất 1 lần.
 1. `POST /api/jobs/WORKORDER_PLAN/run` `{ "plant": "PL20", "date_from": "2026-10-26", "date_to": "2026-11-01", "opers": ["2010", "3010"], "wait_seconds": 90 }`
    - `plant`: mã plant đang dùng (`GET /api/plants`); bỏ trống = plant mặc định (`is_default`, PL20)
-   - `date_from` / `date_to`: Period trên MES (tối đa 62 ngày, được chọn ngày tương lai); bỏ trống = hôm nay − `workorder_period_days_before` (0) → hôm nay + `workorder_period_days_after` (7); lịch 08:00 cũng dùng cách này
+   - `date_from` / `date_to`: Period trên MES (tối đa 62 ngày, được chọn ngày tương lai); bỏ trống = **hôm nay ~ hôm nay**. Lịch tự động 08:00 cũng lấy hôm nay ~ hôm nay (sản lượng tự động thì lấy hôm qua)
    - `opers`: các xưởng đang dùng (`GET /api/opers`); bỏ trống = mọi xưởng đang dùng
    - SMS **chốt đủ 4 điều kiện ngay khi tạo lần chạy**: `params` trả về luôn có `plant`, `period_from`, `period_to`, `opers` — hiển thị cho người bấm xác nhận
    - Mã sai/tắt, từ > đến, quá 62 ngày → 400

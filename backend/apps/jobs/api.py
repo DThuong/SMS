@@ -23,7 +23,7 @@ Luồng kế hoạch Work Order cho DYS (mỗi xưởng một file):
        {"plant": "PL20", "date_from": "2026-10-26", "date_to": "2026-11-01", "opers": ["2010", "3010"],
         "wait_seconds": 90}
      plant bỏ trống = plant mặc định (GET /api/plants) · date_from/date_to = Period trên MES (được chọn ngày tương lai,
-     tối đa 62 ngày; bỏ trống = hôm nay - workorder_period_days_before → hôm nay + workorder_period_days_after)
+     tối đa 62 ngày; bỏ trống = hôm nay ~ hôm nay — lịch tự động 08:00 cũng lấy hôm nay)
      · opers bỏ trống = mọi xưởng đang dùng
   2. finished=false → gọi GET /api/runs/{id} tới khi finished=true
      status: success = đủ xưởng · partial = có xưởng lỗi (xem error) · failed = không lấy được xưởng nào
@@ -137,8 +137,8 @@ def _workorder_params(data: RunIn) -> dict:
     """
     WORKORDER_PLAN — chốt đủ 4 điều kiện ngay khi tạo lần chạy (lần chạy ghi rõ đã chọn gì):
       plant     : mã plant đang dùng (bỏ trống = plant mặc định)
-      date_from : Period từ ngày ┐ bỏ trống cả 2 = hôm nay - workorder_period_days_before
-      date_to   : Period đến ngày┘                → hôm nay + workorder_period_days_after
+      date_from : Period từ ngày ┐ bỏ trống cả 2 = hôm nay ~ hôm nay
+      date_to   : Period đến ngày┘ (bỏ trống 1 ô = bằng ô kia)
       opers     : các xưởng đang dùng (bỏ trống = mọi xưởng đang dùng)
     """
     from apps.core.models import Oper, Plant

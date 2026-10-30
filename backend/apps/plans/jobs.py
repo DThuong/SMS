@@ -41,17 +41,17 @@ MAX_PERIOD_DAYS = 62      # WORKORDER_PLAN: Period tối đa 62 ngày / 1 lần 
 
 
 def default_period(base):
-    """Period mặc định: base - workorder_period_days_before → base + workorder_period_days_after"""
-    return (base - timedelta(days=max(0, get_setting("workorder_period_days_before", 0))),
-            base + timedelta(days=max(0, get_setting("workorder_period_days_after", 7))))
+    """Period mặc định của kế hoạch WO (lịch tự động / gọi API không truyền ngày): từ ngày = đến ngày = ngày chạy.
+    (Khác sản lượng: sản lượng tự động lấy ngày HÔM TRƯỚC.)"""
+    return base, base
 
 
 def resolve_workorder_params(params: dict) -> tuple[Plant, "date", "date"]:
     """
     Plant + kỳ Period cho job WORKORDER_PLAN:
       plant          : mã plant (bỏ trống = plant mặc định trong bảng plants, thường là PL20)
-      period_from/to : YYYY-MM-DD (bỏ trống = theo ngày chạy: từ hôm nay - workorder_period_days_before
-                       đến hôm nay + workorder_period_days_after; lịch tự động tính theo ngày của kỳ)
+      period_from/to : YYYY-MM-DD (bỏ trống = từ ngày = đến ngày = ngày chạy; lịch tự động = ngày của kỳ, vd kỳ
+                       30/10 08:00 → 30/10 ~ 30/10, chạy bù sau nửa đêm vẫn 30/10)
     """
     from datetime import date
 

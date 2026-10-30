@@ -100,10 +100,6 @@ DEFAULT_SETTINGS = [
      "Thời gian tối đa chờ WPS nhận dữ liệu sau khi bấm nút Excel", False),
     ("mes_auto_dismiss_upgrade", "true", "bool", "Tự đóng hộp thoại nâng cấp",
      "Tự bấm No mỗi khi MES hỏi nâng cấp phiên bản", False),
-    ("workorder_period_days_before", "0", "int", "Kế hoạch WO: lùi bao nhiêu ngày",
-     "Job WORKORDER_PLAN tự động (hoặc chạy không truyền ngày): Period từ = hôm nay trừ số ngày này", False),
-    ("workorder_period_days_after", "7", "int", "Kế hoạch WO: tới bao nhiêu ngày sau",
-     "Job WORKORDER_PLAN tự động (hoặc chạy không truyền ngày): Period đến = hôm nay cộng số ngày này", False),
     ("delete_file_after_import", "true", "bool", "Xóa file sau khi DYS import",
      "DYS báo import thành công thì xóa file sản lượng trên máy", False),
     ("data_retention_days", "3", "int", "Giữ dữ liệu (ngày)",
@@ -114,7 +110,8 @@ DEFAULT_SETTINGS = [
 ]
 OBSOLETE_SETTINGS = ["dys_api_url", "dys_production_import_path", "dys_report_date_format",
                      "dys_timeout_seconds", "dys_verify_ssl",
-                     "file_retention_days", "workorder_retention_days"]   # đã gộp thành data_retention_days
+                     "file_retention_days", "workorder_retention_days",   # đã gộp thành data_retention_days
+                     "workorder_period_days_before", "workorder_period_days_after"]   # Period tự động = hôm nay
 
 
 class ApiKey(models.Model):
