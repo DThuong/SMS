@@ -136,6 +136,7 @@ class OperIn(Schema):
     description: str = ""
     is_active: bool = True
     sort_order: int = 0
+    dys_department_id: int | None = None    # departmentId bên DYS khi import kế hoạch (2010 SMD → 1, 3010 MAIN → 2)
 
 
 class OperOut(OperIn):
@@ -159,7 +160,8 @@ def update_oper(request, code: str, data: OperIn):
     oper = get_object_or_404(Oper, code=code)
     if data.code != code and Oper.objects.filter(code=data.code).exists():
         raise HttpError(400, f"Mã Oper {data.code} đã tồn tại")
-    for k, v in data.dict().items():
+    # Chỉ sửa trường có gửi lên — client cũ không gửi dys_department_id thì không bị xóa mất
+    for k, v in data.dict(exclude_unset=True).items():
         setattr(oper, k, v)
     oper.save()
     return oper

@@ -65,6 +65,15 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
                              "Bấm nút Excel bằng tay trên MES xem có mở WPS không; tăng 'mes_export_timeout_seconds'."),
     "SHEET_DATA_UNSTABLE": ("Dữ liệu xuất chưa ổn định", "MES ghi quá lâu, chạy lại hoặc tăng thời gian chờ."),
     "SHEET_READ_FAILED": ("Không đọc được bảng dữ liệu", "Định dạng file xuất từ MES khác dự kiến."),
+    "DYS_LOGIN_FAILED": ("SMS không đăng nhập được DYS",
+                         "Kiểm tra 'dys_username' / 'dys_password' trong cài đặt (tài khoản phải có quyền import). "
+                         "File vẫn được giữ — sửa xong chạy lại job hoặc import tay trên DYS."),
+    "DYS_UNREACHABLE": ("Máy MES không kết nối được DYS",
+                        "Kiểm tra mạng máy MES và 'dys_api_url' (mặc định https://account.dongyang.site/api)."),
+    "DYS_IMPORT_FAILED": ("DYS từ chối import file",
+                          "Xem câu lỗi DYS trả về trong nhật ký. File vẫn được giữ để import lại sau khi sửa."),
+    "DYS_DEPARTMENT_MISSING": ("Xưởng chưa gán department DYS",
+                               "Điền dys_department_id cho xưởng (PUT /api/opers/{code}), vd 2010 → 1, 3010 → 2."),
     "INVALID_PARAMS": ("Tham số không hợp lệ", "Kiểm tra lại ngày / xưởng truyền vào."),
     "UNKNOWN": ("Lỗi không xác định", "Xem chi tiết trong các bước của lần chạy và ảnh chụp lúc lỗi."),
 }

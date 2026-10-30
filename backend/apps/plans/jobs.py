@@ -7,7 +7,57 @@ from django.utils import timezone
 from apps.core.models import Oper, Plant, get_setting
 
 from .models import File
-from .services import production_target, purge_missing_files, register_production_file, save_export
+from .services import (mark_import_result, production_target, purge_missing_files, register_production_file,
+                       save_export)
+
+
+# ======================= BƯỚC CUỐI: IMPORT VÀO DYS =======================
+def import_to_dys(f: File, log) -> None:
+    """
+    Đưa file vừa lấy từ MES vào DYS bằng tài khoản DYS của SMS (apps/plans/dys.py).
+      sản lượng  → POST /api/ProductionResult/import?reportDate=
+      kế hoạch   → POST /api/PlanWork/import?departmentId=   (department theo xưởng)
+    Thành công → files.status = imported (bật delete_file_after_import thì xóa file + dòng).
+    Thất bại   → files.status = import_failed + lời DYS, GIỮ file để import lại; ném DysError cho vòng lặp ghi lỗi.
+    """
+    from .dys import DysError, import_production, import_workorder, importer_name
+
+    if f.kind == File.Kind.PRODUCTION:
+        what = f"sản lượng ngày {f.report_date:%d/%m/%Y}"
+    else:
+        what = f"kế hoạch {f.oper.code} {f.oper.name}"
+    rows, path = f.rows, settings.STORAGE_DIR / f.file_path
+    log.info("Import %s vào DYS (%d dòng)...", what, rows)
+    try:
+        if f.kind == File.Kind.PRODUCTION:
+            msg = import_production(path, f.report_date)
+        else:
+            dep = f.oper.dys_department_id
+            if not dep:
+                raise DysError(f"Xưởng {f.oper.code} {f.oper.name} chưa gán department DYS (opers.dys_department_id)",
+                               "DYS_DEPARTMENT_MISSING")
+            msg = import_workorder(path, dep)
+    except DysError as e:
+        mark_import_result(f, False, str(e), importer_name(), delete_file=False)
+        log.error("Import %s vào DYS THẤT BẠI [%s]: %s — file giữ lại để import lại", what, e.code, e)
+        raise
+    deleted = mark_import_result(f, True, msg, importer_name(),
+                                 delete_file=get_setting("delete_file_after_import", True))
+    log.info("DYS đã nhận %s (%d dòng)%s. DYS trả: %s", what, rows, " — đã xóa file trên máy" if deleted else "",
+             msg[:300])
+
+
+def _finish_item(f: File, log, empty_note: str) -> None:
+    """Sau khi lưu 1 file: 0 dòng → không gửi DYS (tránh ghi đè dữ liệu bằng file rỗng); còn lại → import"""
+    from .dys import enabled
+
+    if f.rows == 0:
+        log.warning("Không import %s: file 0 dòng (%s)", f.file_name, empty_note)
+        return
+    if not enabled():
+        log.info("Bỏ qua import (dys_import_enabled = false) — file chờ DYS tự tải về import")
+        return
+    import_to_dys(f, log)
 
 
 def mes_config() -> dict:
@@ -37,6 +87,7 @@ def _load_collector(name: str):
     return C
 
 
+FAILED_KEEP_DAYS = 30    # CLEANUP: file chưa import được vào DYS giữ tối đa 30 ngày để import lại
 MAX_PERIOD_DAYS = 62      # WORKORDER_PLAN: Period tối đa 62 ngày / 1 lần chạy (MES xuất càng nhiều ngày càng lâu)
 
 
@@ -105,7 +156,7 @@ def _export_checked(collector, log, plant: str, d1, d2, code: str):
 
 
 def workorder_plan(run, log):
-    """MES → View Work Order → Plant → Period (từ ~ đến) → từng Oper → View → Excel → lưu file (DYS tải về import)"""
+    """MES → View Work Order → Plant → Period (từ ~ đến) → từng Oper → View → Excel → lưu file → import vào DYS"""
     from apps.collector.errors import AgentError
 
     params = run.params or {}
@@ -148,16 +199,21 @@ def workorder_plan(run, log):
             log.info("Oper %s %s: %d dòng (bảng xuất có %d dòng%s)", oper.code, oper.name, len(df), len(df_all),
                      f", lẫn xưởng khác: {', '.join(others)}" if others else "")
             ef = save_export(run, plant, oper, df, export_dt, d1, d2)
-            log.info("Đã lưu %s (%d dòng) — sẵn sàng cho DYS tải về import", ef.file_path, ef.rows)
-            total += ef.rows
+            log.info("Đã lưu %s (%d dòng)", ef.file_path, ef.rows)
         except Exception as e:
             errors.append(f"{oper.code} {oper.name}: {e}")
             first_code = first_code or getattr(e, "code", None)
             _screenshot(collector, run, oper.code, log, f"Lỗi khi lấy {oper.name}: {e}")
+            continue
+        # Bước cuối: import vào DYS. Lỗi ở đây là lỗi DYS (không chụp màn hình MES), xưởng này tính là chưa xong
+        try:
+            _finish_item(ef, log, "xưởng không có Work Order trong Period")
+            total += ef.rows
+        except Exception as e:
+            errors.append(f"{oper.code} {oper.name}: import DYS lỗi — {e}")
+            first_code = first_code or getattr(e, "code", None)
 
-    if errors and len(errors) == len(opers):
-        raise AgentError("; ".join(errors), first_code or "UNKNOWN")
-    return total, errors
+    return _result(run, total, errors, len(opers), first_code)
 
 
 def _screenshot(collector, run, tag, log, message=None):
@@ -184,7 +240,7 @@ def parse_report_date(value):
 
 def production_output(run, log):
     """
-    MES → Inquiry → 타임별 실적 조회(TV) → FROM_DATE → View → Excel → lưu file chờ DYS tải về import.
+    MES → Inquiry → 타임별 실적 조회(TV) → FROM_DATE → View → Excel → lưu file → import vào DYS.
     MES mỗi lần chỉ xem được 1 ngày → params.report_dates nhiều ngày thì lặp lần lượt, mỗi ngày 1 file.
     """
     from apps.collector.errors import AgentError
@@ -211,20 +267,37 @@ def production_output(run, log):
         try:
             path, rows, export_dt = collector.collect(d, production_target(d))
             report = register_production_file(run, d, path, rows, export_dt)
-            if report.rows == 0:
-                log.warning("File %s không có dòng dữ liệu nào — MES chưa tải xong (tăng mes_view_wait_seconds) "
-                            "hoặc ngày %s chưa có sản lượng", path.name, d.strftime("%d/%m/%Y"))
-            else:
-                log.info("Đã lưu %s (%d dòng dữ liệu) — sẵn sàng cho DYS tải về import", path.name, report.rows)
-            total += report.rows
+            log.info("Đã lưu %s (%d dòng dữ liệu)", path.name, report.rows)
         except Exception as e:
             errors.append(f"{d:%d/%m/%Y}: {e}")
             first_code = first_code or getattr(e, "code", None)
             _screenshot(collector, run, f"production_{d:%Y%m%d}", log, f"Lỗi khi lấy sản lượng ngày {d:%d/%m/%Y}: {e}")
             collector.form = None          # mở lại form ở ngày kế tiếp cho chắc
+            continue
+        # Bước cuối: import vào DYS — ngày này chỉ tính là xong khi DYS nhận thành công
+        try:
+            _finish_item(report, log, "MES chưa tải xong — tăng mes_view_wait_seconds — hoặc ngày chưa có sản lượng")
+            total += report.rows
+        except Exception as e:
+            errors.append(f"{d:%d/%m/%Y}: import DYS lỗi — {e}")
+            first_code = first_code or getattr(e, "code", None)
 
-    if errors and len(errors) == len(dates):
+    return _result(run, total, errors, len(dates), first_code)
+
+
+def _result(run, total: int, errors: list[str], n_items: int, first_code):
+    """
+    Kết quả job theo từng ngày / xưởng (mỗi mục tối đa 1 lỗi — lấy MES lỗi HOẶC import DYS lỗi):
+      không lỗi           → success  (mọi mục đã vào DYS)
+      lỗi một phần        → partial  (error_code = lỗi đầu tiên để DYS hiện cách xử lý)
+      mục nào cũng lỗi    → failed
+    """
+    from apps.collector.errors import AgentError
+
+    if errors and len(errors) >= n_items:
         raise AgentError("; ".join(errors), first_code or "UNKNOWN")
+    if errors:
+        run.error_code = first_code or "UNKNOWN"     # runner lưu cùng lúc với status partial
     return total, errors
 
 
@@ -239,7 +312,14 @@ def cleanup(run, log):
     log.info("Xóa dữ liệu sản lượng & kế hoạch cũ hơn %d ngày (trước %s)",
              days, timezone.localtime(limit).strftime("%d/%m/%Y %H:%M"))
 
-    old = File.objects.filter(created_at__lt=limit)
+    # File CHƯA vào DYS (import lỗi / chưa import) mà còn dữ liệu → giữ tới FAILED_KEEP_DAYS ngày để import lại,
+    # không để nghỉ cuối tuần / lễ Tết làm mất sản lượng. File đã import hoặc 0 dòng → xóa theo số ngày ở trên.
+    from django.db.models import Q
+
+    keep_limit = timezone.now() - timedelta(days=max(days, FAILED_KEEP_DAYS))
+    old = File.objects.filter(created_at__lt=limit).filter(
+        Q(status=File.Status.IMPORTED) | Q(rows=0) | Q(created_at__lt=keep_limit))
+    kept = File.objects.filter(created_at__lt=limit).exclude(pk__in=old.values("pk"))
     counts = {}
     for kind, label in File.Kind.choices:
         counts[kind] = old.filter(kind=kind).count()
@@ -248,6 +328,10 @@ def cleanup(run, log):
     n_files, _ = old.delete()                  # rồi xóa dòng files
     log.info("Đã xóa %d file sản lượng, %d file kế hoạch",
              counts.get(File.Kind.PRODUCTION, 0), counts.get(File.Kind.WORKORDER, 0))
+    n_kept = kept.count()
+    if n_kept:
+        log.warning("Giữ lại %d file CHƯA vào DYS (quá %d ngày nhưng chưa import được, giữ tối đa %d ngày): %s",
+                    n_kept, days, FAILED_KEEP_DAYS, ", ".join(kept.values_list("file_name", flat=True)[:20]))
     n_missing = purge_missing_files()          # dòng còn lại mà file đã mất (xóa tay, import xong...)
     if n_missing:
         log.info("Đã xóa %d dòng file không còn trong storage", n_missing)

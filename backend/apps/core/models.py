@@ -42,6 +42,9 @@ class Oper(models.Model):
     description = models.CharField("Mô tả", max_length=255, blank=True)
     is_active = models.BooleanField("Đang dùng", default=True)
     sort_order = models.PositiveIntegerField("Thứ tự", default=0)
+    # Department bên DYS nhận kế hoạch của xưởng này: POST /api/PlanWork/import?departmentId=<id>
+    # (2010 SMD → 1, 3010 MAIN → 2). Trống = không import được kế hoạch xưởng này vào DYS
+    dys_department_id = models.PositiveIntegerField("Department DYS", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -100,16 +103,26 @@ DEFAULT_SETTINGS = [
      "Thời gian tối đa chờ WPS nhận dữ liệu sau khi bấm nút Excel", False),
     ("mes_auto_dismiss_upgrade", "true", "bool", "Tự đóng hộp thoại nâng cấp",
      "Tự bấm No mỗi khi MES hỏi nâng cấp phiên bản", False),
-    ("delete_file_after_import", "true", "bool", "Xóa file sau khi DYS import",
-     "DYS báo import thành công thì xóa file sản lượng trên máy", False),
+    ("delete_file_after_import", "true", "bool", "Xóa file sau khi import",
+     "Import vào DYS thành công thì xóa file trên máy + dòng trong bảng files", False),
+    # --- Bước cuối của job: SMS tự đăng nhập DYS và import file vừa lấy (apps/plans/dys.py) ---
+    ("dys_import_enabled", "true", "bool", "Tự import vào DYS",
+     "Job chỉ hoàn thành khi import vào DYS thành công. Tắt = chỉ lưu file, chờ DYS tự tải về import", False),
+    ("dys_api_url", "https://account.dongyang.site/api", "str", "Địa chỉ API DYS",
+     "Gốc API backend DYS (đã gồm /api), vd https://account.dongyang.site/api", False),
+    ("dys_username", "SCAN_MES", "str", "Tài khoản DYS cho SMS",
+     "Tài khoản DYS riêng của hệ thống scan MES (import sản lượng + kế hoạch định kỳ)", False),
+    ("dys_password", "", "str", "Mật khẩu DYS cho SMS",
+     "Bỏ trống = dùng DYS_PASSWORD trong backend/.env", True),
+    ("dys_timeout_seconds", "120", "int", "Chờ DYS import (giây)",
+     "Thời gian tối đa chờ DYS xử lý 1 file import", False),
     ("data_retention_days", "3", "int", "Giữ dữ liệu (ngày)",
      "Job CLEANUP xóa file + dữ liệu sản lượng và kế hoạch (Work Order) cũ hơn số ngày này. "
      "Sửa qua PUT /api/retention", False),
     ("session_minutes", "15", "int", "Thời lượng phiên API (phút)",
      "Token phiên đổi từ API key chỉ dùng được tối đa số phút này", False),
 ]
-OBSOLETE_SETTINGS = ["dys_api_url", "dys_production_import_path", "dys_report_date_format",
-                     "dys_timeout_seconds", "dys_verify_ssl",
+OBSOLETE_SETTINGS = ["dys_production_import_path", "dys_report_date_format", "dys_verify_ssl",
                      "file_retention_days", "workorder_retention_days",   # đã gộp thành data_retention_days
                      "workorder_period_days_before", "workorder_period_days_after"]   # Period tự động = hôm nay
 
