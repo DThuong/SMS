@@ -95,6 +95,11 @@ class ApiKey(models.Model):
     use_count = models.PositiveIntegerField("Số lần dùng", default=0)
     last_used_at = models.DateTimeField("Dùng lần cuối", null=True, blank=True)
     created_at = models.DateTimeField("Tạo lúc", auto_now_add=True)
+    # Phiên đang mở của khóa — MỖI KHÓA CHỈ 1 PHIÊN: tạo phiên mới thì phiên cũ bị thay thế (401 SESSION_REPLACED)
+    session_id = models.CharField("Mã phiên hiện tại", max_length=32, blank=True, default="", db_default="")
+    session_user = models.CharField("Người đang dùng (DYS)", max_length=150, blank=True, default="", db_default="")
+    session_started_at = models.DateTimeField("Phiên bắt đầu", null=True, blank=True)
+    session_expires_at = models.DateTimeField("Phiên hết hạn", null=True, blank=True)
 
     class Meta:
         db_table = "api_keys"

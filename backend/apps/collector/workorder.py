@@ -50,7 +50,7 @@ class WorkOrderCollector(BaseCollector):
         self.log.info("Chờ WPS nhận dữ liệu (tối đa %ss)...", timeout)
         tick = self.mes.handle_popup
         wb, ws, export_dt = self.sheets.wait_for_export(EXPORT_TITLE, clicked_at, timeout, tick, before=before)
-        self.sheets.wait_until_stable(ws, tick=tick)
+        self.sheets.wait_until_stable(ws, tick=tick, timeout=timeout)   # MES ghi ~90s+ → không dùng mặc định 120s
         df = self.sheets.read_table(ws)
         self.sheets.close(wb)
         self.log.info("Đọc được %d dòng, %d cột", len(df), len(df.columns))

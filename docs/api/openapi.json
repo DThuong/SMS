@@ -1,0 +1,1682 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SMS API (Scan MES System)",
+    "version": "3.0",
+    "description": "Agent lấy dữ liệu MESClient cho DYS. Gọi POST /api/auth/session bằng API key để lấy token (hạn 15 phút), rồi bấm Authorize → dán token vào ô Bearer."
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "apps_core_api_health",
+        "summary": "Kiểm tra API + database còn sống",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Kiểm tra API + database còn sống (dùng cho Docker healthcheck / Cloudflare)",
+        "tags": [
+          "Phiên & sức khỏe"
+        ]
+      }
+    },
+    "/api/auth/session": {
+      "post": {
+        "operationId": "apps_core_api_create_api_session",
+        "summary": "Đổi API key lấy token phiên (15 phút, 1 người / khóa)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Đổi API key lấy token phiên (hạn `session_minutes`, mặc định 15 phút). Gửi token ở header\n`Authorization: Bearer <token>` cho mọi API khác.\n\n**Mỗi API key chỉ 1 phiên / 1 người:** tạo phiên mới thì phiên cũ (nếu còn hạn) bị thay thế ngay —\nngười đang dùng phiên cũ nhận 401 `SESSION_REPLACED`. `replaced` cho biết phiên của ai vừa bị thay.\nToken gắn với `username`; gửi `X-Requested-By` khác username → 401 `SESSION_USER_MISMATCH`.\nDùng `expires_at` + `server_time` để hiển thị đồng hồ đếm ngược (trừ lệch giờ máy khách).",
+        "tags": [
+          "Phiên & sức khỏe"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionIn"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "get": {
+        "operationId": "apps_core_api_current_session",
+        "summary": "Thời gian còn lại của phiên (đồng hồ đếm ngược)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Phiên còn dùng được không + `expires_at`, `remaining_seconds`, `server_time`, người đang dùng (401 = hết hạn / bị thay)",
+        "tags": [
+          "Phiên & sức khỏe"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "apps_core_api_logout_session",
+        "summary": "Đăng xuất (kết thúc phiên hiện tại)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Kết thúc phiên đang dùng → API key trống phiên, người khác đăng nhập ngay được",
+        "tags": [
+          "Phiên & sức khỏe"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/opers": {
+      "get": {
+        "operationId": "apps_core_api_list_opers",
+        "summary": "Danh sách xưởng (Oper)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OperOut"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "apps_core_api_create_oper",
+        "summary": "Thêm xưởng",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperOut"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/opers/{code}": {
+      "put": {
+        "operationId": "apps_core_api_update_oper",
+        "summary": "Sửa xưởng",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperOut"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "apps_core_api_delete_oper",
+        "summary": "Xóa xưởng (chưa có file)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "apps_core_api_list_settings",
+        "summary": "Danh sách cài đặt agent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SettingOut"
+                  },
+                  "title": "Response",
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/settings/{key}": {
+      "put": {
+        "operationId": "apps_core_api_update_setting",
+        "summary": "Sửa một cài đặt",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingOut"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/retention": {
+      "get": {
+        "operationId": "apps_core_api_get_retention",
+        "summary": "Xem số ngày giữ dữ liệu",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Số ngày giữ dữ liệu hiện tại + lịch dọn + số file sắp bị xóa",
+        "tags": [
+          "Cài đặt"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "apps_core_api_update_retention",
+        "summary": "Đổi số ngày giữ dữ liệu",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Đổi số ngày giữ dữ liệu sản lượng & kế hoạch (mặc định 3).\nÁp dụng ở lần chạy job CLEANUP kế tiếp; muốn xóa ngay: POST /api/jobs/CLEANUP/run",
+        "tags": [
+          "Cài đặt"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard": {
+      "get": {
+        "operationId": "apps_core_api_dashboard",
+        "summary": "Tổng quan: worker, job, file hôm nay",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Tổng quan"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "operationId": "apps_jobs_api_list_jobs",
+        "summary": "Danh sách job + lịch + kỳ hiện tại",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Job"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/jobs/{code}": {
+      "put": {
+        "operationId": "apps_jobs_api_update_job",
+        "summary": "Sửa lịch / bật tắt job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Job"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/jobs/{code}/run": {
+      "post": {
+        "operationId": "apps_jobs_api_run_job",
+        "summary": "Chạy job ngay (sản lượng theo ngày / khoảng ngày, kế hoạch theo xưởng)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Đưa yêu cầu vào HÀNG CHỜ (không bao giờ trả 409 vì đang bận). Ai bấm trước chạy trước; đang có job chạy thì\nyêu cầu này chờ tới lượt — xem `queue_ahead` (số lần chạy đứng trước) trong kết quả / GET /api/runs/{id}.\nHeader X-Requested-By = người bấm bên DYS.",
+        "tags": [
+          "Job"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/queue": {
+      "get": {
+        "operationId": "apps_jobs_api_get_queue",
+        "summary": "Hàng chờ: lần đang chạy + các lần đang chờ theo thứ tự",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Thứ tự thực hiện hiện tại: phần tử đầu là lần đang chạy (nếu có), sau đó các lần chờ theo thứ tự bấm",
+        "tags": [
+          "Job"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "operationId": "apps_jobs_api_list_runs",
+        "summary": "Lịch sử chạy (lọc job, trạng thái, ngày)",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "job",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Status"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date From"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date To"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "default": 1,
+              "title": "Page",
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "default": 20,
+              "title": "Page Size",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "operationId": "apps_jobs_api_get_run",
+        "summary": "Chi tiết 1 lần chạy + nhật ký + file",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Chi tiết 1 lần chạy: trạng thái, error_info, toàn bộ nhật ký, các file đã lấy, worker_online",
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "apps_jobs_api_delete_run",
+        "summary": "Xóa 1 lần chạy khỏi lịch sử",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Xóa 1 lần chạy khỏi lịch sử (kèm nhật ký + ảnh lỗi). Lần chạy đang chờ/đang chạy → 409.\nFile lấy từ MES của lần chạy đó KHÔNG bị xóa (vẫn xem/tải ở /api/files).",
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/runs/{run_id}/logs": {
+      "get": {
+        "operationId": "apps_jobs_api_get_run_logs",
+        "summary": "Nhật ký mới của lần chạy (after_seq)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "schema": {
+              "default": 0,
+              "title": "After Seq",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Gọi định kỳ với after_seq = seq lớn nhất đã có để chỉ lấy dòng nhật ký mới",
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/runs/{run_id}/logs/{seq}/screenshot": {
+      "get": {
+        "operationId": "apps_jobs_api_log_screenshot",
+        "summary": "Ảnh màn hình lúc lỗi",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "seq",
+            "schema": {
+              "title": "Seq",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/runs/delete": {
+      "post": {
+        "operationId": "apps_jobs_api_delete_runs",
+        "summary": "Xóa nhiều lần chạy (ids / bộ lọc / all)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Xóa nhiều lần chạy một lúc. Truyền `ids`, hoặc bộ lọc (`job`, `status`, `date_from`, `date_to`),\nhoặc `all: true` để xóa hết. Không có điều kiện nào → 400 (tránh lỡ tay xóa sạch).\nLần chạy đang chờ/đang chạy luôn được bỏ qua. Trả về số lần chạy / dòng nhật ký / ảnh lỗi đã xóa.",
+        "tags": [
+          "Lịch sử chạy"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunDeleteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/files": {
+      "get": {
+        "operationId": "apps_plans_api_list_files",
+        "summary": "Danh sách file lấy từ MES",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Kind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "oper",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Oper"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "report_date",
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Report Date"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Status"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date From"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date To"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "default": 1,
+              "title": "Page",
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "default": 20,
+              "title": "Page Size",
+              "type": "integer"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "File từ MES"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/files/{file_id}": {
+      "get": {
+        "operationId": "apps_plans_api_get_file",
+        "summary": "Chi tiết 1 file",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "File từ MES"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "apps_plans_api_delete_file",
+        "summary": "Xóa file trên ổ đĩa (with_data: xóa cả dòng)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "with_data",
+            "schema": {
+              "default": false,
+              "title": "With Data",
+              "type": "boolean"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Xóa file trên ổ đĩa; with_data=true thì xóa luôn dòng trong bảng files",
+        "tags": [
+          "File từ MES"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/files/{file_id}/download": {
+      "get": {
+        "operationId": "apps_plans_api_download_file",
+        "summary": "Tải file .xlsx để DYS import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Tải file .xlsx để DYS import (sản lượng: POST /api/ProductionResult/import của DYS)",
+        "tags": [
+          "File từ MES"
+        ],
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    },
+    "/api/files/{file_id}/import-result": {
+      "post": {
+        "operationId": "apps_plans_api_import_result",
+        "summary": "DYS báo kết quả import file",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "schema": {
+              "title": "File Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "DYS báo kết quả import file (sản lượng hoặc kế hoạch) → thành công thì xóa file nếu bật delete_file_after_import",
+        "tags": [
+          "File từ MES"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportResultIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "SessionBearer": []
+          },
+          {
+            "SessionQuery": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SessionIn": {
+        "properties": {
+          "api_key": {
+            "title": "Api Key",
+            "type": "string"
+          },
+          "username": {
+            "default": "",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_key"
+        ],
+        "title": "SessionIn",
+        "type": "object"
+      },
+      "OperOut": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "sort_order": {
+            "default": 0,
+            "title": "Sort Order",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "folder",
+          "id"
+        ],
+        "title": "OperOut",
+        "type": "object"
+      },
+      "OperIn": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "sort_order": {
+            "default": 0,
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "folder"
+        ],
+        "title": "OperIn",
+        "type": "object"
+      },
+      "SettingOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          },
+          "value_type": {
+            "title": "Value Type",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "is_secret": {
+            "title": "Is Secret",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "value_type",
+          "label",
+          "description",
+          "is_secret"
+        ],
+        "title": "SettingOut",
+        "type": "object"
+      },
+      "SettingIn": {
+        "properties": {
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SettingIn",
+        "type": "object"
+      },
+      "RetentionIn": {
+        "properties": {
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "days"
+        ],
+        "title": "RetentionIn",
+        "type": "object"
+      },
+      "JobIn": {
+        "properties": {
+          "cron": {
+            "title": "Cron",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "params": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "cron",
+          "is_active"
+        ],
+        "title": "JobIn",
+        "type": "object"
+      },
+      "RunIn": {
+        "properties": {
+          "report_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Date"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "opers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opers"
+          },
+          "wait_seconds": {
+            "default": 0,
+            "title": "Wait Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "RunIn",
+        "type": "object"
+      },
+      "RunFilter": {
+        "properties": {
+          "job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 20,
+            "title": "Page Size",
+            "type": "integer"
+          }
+        },
+        "title": "RunFilter",
+        "type": "object"
+      },
+      "Status": {
+        "enum": [
+          "saved",
+          "imported",
+          "import_failed"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "RunDeleteIn": {
+        "properties": {
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ids"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "all": {
+            "default": false,
+            "title": "All",
+            "type": "boolean"
+          }
+        },
+        "title": "RunDeleteIn",
+        "type": "object"
+      },
+      "FileFilter": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Kind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "oper": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oper"
+          },
+          "report_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Date"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 20,
+            "title": "Page Size",
+            "type": "integer"
+          }
+        },
+        "title": "FileFilter",
+        "type": "object"
+      },
+      "Kind": {
+        "enum": [
+          "workorder",
+          "production"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "ImportResultIn": {
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "imported_by": {
+            "default": "",
+            "title": "Imported By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "title": "ImportResultIn",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "SessionBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "SessionQuery": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "token"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://sms-backend.dongyang.site",
+      "description": "Cloudflare (HTTPS)"
+    },
+    {
+      "url": "http://172.16.162.60:8000",
+      "description": "LAN máy MES"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Phiên & sức khỏe"
+    },
+    {
+      "name": "Tổng quan"
+    },
+    {
+      "name": "Job"
+    },
+    {
+      "name": "Lịch sử chạy"
+    },
+    {
+      "name": "File từ MES"
+    },
+    {
+      "name": "Cài đặt"
+    }
+  ]
+}

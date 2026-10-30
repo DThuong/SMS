@@ -1,29 +1,40 @@
 """
 Xác thực API theo PHIÊN (tối đa 15 phút, sửa được ở setting `session_minutes`).
 
-  1. Đổi API key lấy phiên:  POST /api/auth/session   {"api_key": "<khóa>"}
-       → {"token": "...", "expires_at": "...", "expires_in": 900, "name": "..."}
+  1. Đổi API key lấy phiên:  POST /api/auth/session   {"api_key": "<khóa>", "username": "<user DYS>"}
+       → {"token", "user", "expires_at", "expires_in", "server_time", "replaced"}
   2. Gọi các API khác bằng token của phiên, MỘT trong hai cách:
        - Header  Authorization: Bearer <token>   (khuyên dùng)
        - Query   ?token=<token>                  (khi không đặt được header, vd link tải file)
-  3. Hết 15 phút → API trả 401 "Phiên đã hết hạn" → DYS gọi lại bước 1.
+  3. Hết hạn → 401 code SESSION_EXPIRED → DYS gọi lại bước 1.
 
-API key gốc KHÔNG dùng trực tiếp được nữa (chỉ để đổi lấy phiên). Khóa API key (is_active=0)
-thì mọi phiên đang mở của khóa đó bị chặn ngay.
-Header tùy chọn X-Requested-By: <username bên DYS> để ghi ai thao tác.
+MỖI API KEY CHỈ 1 PHIÊN / 1 NGƯỜI tại một thời điểm:
+  - Tạo phiên mới bằng cùng khóa → phiên cũ bị thay thế ngay (người cũ nhận 401 code SESSION_REPLACED).
+  - Token gắn với username lúc tạo phiên; gửi kèm X-Requested-By khác username đó → 401 SESSION_USER_MISMATCH.
+  - Đăng xuất: DELETE /api/auth/session. Khóa API key (is_active=0) → mọi phiên bị chặn (SESSION_REVOKED).
+Lỗi 401 phiên trả {"detail": "...", "code": "SESSION_..."} để DYS biết nên tự gia hạn hay báo người dùng.
 """
 import hashlib
+import secrets
 from datetime import timedelta
 
 from django.core import signing
 from django.db.models import F
 from django.http import HttpRequest
 from django.utils import timezone
-from ninja.errors import HttpError
 from ninja.security import APIKeyQuery, HttpBearer
 
 SESSION_SALT = "sms.api-session"
 DEFAULT_SESSION_MINUTES = 15
+TOKEN_MAX_AGE = 24 * 3600          # chặn trên cho chữ ký; hạn thật nằm ở api_keys.session_expires_at
+
+
+class SessionError(Exception):
+    """401 có mã — config/api.py trả {"detail", "code"}"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code, self.message = code, message
 
 
 def hash_key(raw: str) -> str:
@@ -52,37 +63,81 @@ def verify_key(raw: str | None):
     return key
 
 
-def create_session(key) -> dict:
-    """Tạo token phiên có chữ ký (không cần lưu DB) — chứa id khóa + 16 ký tự đầu của hash"""
+def _local(dt) -> str:
+    return timezone.localtime(dt).strftime("%H:%M %d/%m") if dt else "?"
+
+
+def create_session(key, user: str) -> dict:
+    """Mở phiên mới cho khóa (thay thế phiên cũ nếu còn hạn). Token có chữ ký: id khóa + mã phiên + username"""
+    from .models import ApiKey
+
+    now = timezone.now()
     minutes = session_minutes()
-    token = signing.dumps({"k": key.id, "h": key.key_hash[:16]}, salt=SESSION_SALT, compress=True)
-    return {"token": token, "token_type": "Bearer", "name": key.name,
-            "expires_in": minutes * 60, "expires_at": timezone.now() + timedelta(minutes=minutes)}
+    expires = now + timedelta(minutes=minutes)
+    replaced = None
+    if key.session_id and key.session_expires_at and key.session_expires_at > now:
+        replaced = {"user": key.session_user, "started_at": key.session_started_at,
+                    "expires_at": key.session_expires_at}
+    sid = secrets.token_hex(8)
+    ApiKey.objects.filter(pk=key.pk).update(session_id=sid, session_user=user[:150],
+                                            session_started_at=now, session_expires_at=expires)
+    token = signing.dumps({"k": key.id, "h": key.key_hash[:16], "s": sid, "u": user[:150]},
+                          salt=SESSION_SALT, compress=True)
+    return {"token": token, "token_type": "Bearer", "name": key.name, "user": user,
+            "expires_in": minutes * 60, "expires_at": expires, "server_time": now,
+            "replaced": replaced}   # phiên của ai vừa bị thay thế (None nếu không có)
 
 
-def verify_session(token: str | None):
-    """Token hợp lệ + chưa quá session_minutes + API key còn bật → trả ApiKey; sai/hết hạn → 401"""
+def _decode(token: str) -> dict:
+    try:
+        return signing.loads(token.strip(), salt=SESSION_SALT, max_age=TOKEN_MAX_AGE)
+    except signing.SignatureExpired:
+        raise SessionError("SESSION_EXPIRED", "Phiên đã hết hạn — hãy tạo phiên mới bằng API key")
+    except signing.BadSignature:
+        raise SessionError("SESSION_INVALID", "Token phiên không hợp lệ")
+
+
+def verify_session(token: str | None, request: HttpRequest | None = None):
+    """Token đúng chữ ký + đúng phiên hiện tại của khóa + chưa hết hạn + đúng người → trả ApiKey"""
     from .models import ApiKey
 
     if not token:
         return None
-    try:
-        data = signing.loads(token.strip(), salt=SESSION_SALT, max_age=session_minutes() * 60)
-    except signing.SignatureExpired:
-        raise HttpError(401, f"Phiên đã hết hạn ({session_minutes()} phút) — hãy tạo phiên mới bằng API key")
-    except signing.BadSignature:
-        raise HttpError(401, "Token phiên không hợp lệ")
+    data = _decode(token)
     key = ApiKey.objects.filter(pk=data.get("k"), is_active=True).first()
     if not key or not key.key_hash.startswith(data.get("h", "-")):
-        raise HttpError(401, "API key của phiên này đã bị khóa hoặc đổi — hãy tạo phiên mới")
+        raise SessionError("SESSION_REVOKED", "API key của phiên này đã bị khóa hoặc đổi — hãy liên hệ quản trị SMS")
+    if data.get("s") != key.session_id:
+        raise SessionError("SESSION_REPLACED",
+                           f"Phiên đã bị thay thế: API key này vừa được đăng nhập bởi '{key.session_user or '?'}' "
+                           f"lúc {_local(key.session_started_at)}. Mỗi API key chỉ 1 người dùng tại một thời điểm.")
+    if not key.session_expires_at or timezone.now() >= key.session_expires_at:
+        raise SessionError("SESSION_EXPIRED",
+                           f"Phiên đã hết hạn ({session_minutes()} phút) — hãy tạo phiên mới bằng API key")
+    user = data.get("u", "")
+    if request is not None:
+        header = (request.headers.get("X-Requested-By") or "").strip()
+        if header and user and header != user:
+            raise SessionError("SESSION_USER_MISMATCH",
+                               f"Token này thuộc về '{user}', không dùng được cho '{header}'")
+        request.sms_user = user
     return key
+
+
+def end_session(key, token: str) -> bool:
+    """Đăng xuất: xóa phiên hiện tại nếu token đúng là phiên đó"""
+    from .models import ApiKey
+
+    data = _decode(token)
+    return ApiKey.objects.filter(pk=key.pk, session_id=data.get("s")).update(
+        session_id="", session_user="", session_expires_at=None) > 0
 
 
 class SessionBearer(HttpBearer):
     """Header Authorization: Bearer <token>"""
 
     def authenticate(self, request: HttpRequest, token: str | None):
-        return verify_session(token)
+        return verify_session(token, request)
 
 
 class SessionQuery(APIKeyQuery):
@@ -90,16 +145,21 @@ class SessionQuery(APIKeyQuery):
     param_name = "token"
 
     def authenticate(self, request: HttpRequest, key: str | None):
-        return verify_session(key)
+        return verify_session(key, request)
 
 
 API_AUTH = [SessionBearer(), SessionQuery()]
 
 
+def request_token(request) -> str:
+    auth = request.headers.get("Authorization") or ""
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else (request.GET.get("token") or "")
+
+
 def requested_by(request) -> str:
-    """Tên người thao tác: header X-Requested-By, nếu không có thì lấy tên gắn với API key"""
-    name = (request.headers.get("X-Requested-By") or "").strip()[:150]
-    if name:
-        return name
+    """Tên người thao tác: username gắn với phiên, rồi header X-Requested-By, rồi tên gắn với API key"""
+    user = getattr(request, "sms_user", "") or (request.headers.get("X-Requested-By") or "").strip()
+    if user:
+        return user[:150]
     auth = getattr(request, "auth", None)
     return getattr(auth, "name", "") or ""

@@ -11,9 +11,9 @@
  * Cần sửa 3 chỗ đánh dấu "SỬA": lấy API key SMS, lấy token DYS, API import của DYS.
  * Giao diện dùng Tailwind; text có sẵn vi/ko/en — nối vào hệ i18n của DYS nếu muốn.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { smsFetch, smsJson, type ApiKeyGetter, type SmsFile, type SmsRun } from "@/lib/sms-client";
+import { setSmsUsername, smsFetch, smsJson, type ApiKeyGetter, type SmsFile, type SmsRun } from "@/lib/sms-client";
 
 // ======================= SỬA cho khớp DYS =======================
 /** SỬA 1: nơi DYS lưu API key SMS người dùng đã điền */
@@ -38,7 +38,7 @@ const TEXT = {
     open: "Lấy sản lượng từ MES", from: "Từ ngày", to: "Đến ngày", run: "Chạy", running: "Đang chạy...",
     close: "Đóng", days: (n: number) => `${n} ngày`, maxDays: `Tối đa ${MAX_DAYS} ngày`,
     invalid: "Từ ngày phải trước hoặc bằng đến ngày", future: "Không chọn ngày tương lai",
-    queued: "Đang chờ worker...", scanning: "Đang scan MES", importing: "Đang import vào DYS",
+    queued: "Đang chờ worker...", queuedAhead: (n: number) => `Đang trong hàng chờ — còn ${n} lượt phía trước`, scanning: "Đang scan MES", importing: "Đang import vào DYS",
     workerOff: "Worker SMS đang tắt — job sẽ chạy khi worker bật lại",
     imported: "Đã import", failed: "Lỗi", done: "Hoàn tất", noFile: "Không có file nào để import",
   },
@@ -46,7 +46,7 @@ const TEXT = {
     open: "MES 생산실적 가져오기", from: "시작일", to: "종료일", run: "실행", running: "실행 중...",
     close: "닫기", days: (n: number) => `${n}일`, maxDays: `최대 ${MAX_DAYS}일`,
     invalid: "시작일은 종료일보다 같거나 빨라야 합니다", future: "미래 날짜는 선택할 수 없습니다",
-    queued: "워커 대기 중...", scanning: "MES 스캔 중", importing: "DYS로 가져오는 중",
+    queued: "워커 대기 중...", queuedAhead: (n: number) => `대기열 — 앞에 ${n}건 남음`, scanning: "MES 스캔 중", importing: "DYS로 가져오는 중",
     workerOff: "SMS 워커가 꺼져 있습니다 — 다시 켜지면 실행됩니다",
     imported: "가져오기 완료", failed: "오류", done: "완료", noFile: "가져올 파일이 없습니다",
   },
@@ -54,7 +54,7 @@ const TEXT = {
     open: "Fetch production from MES", from: "From", to: "To", run: "Run", running: "Running...",
     close: "Close", days: (n: number) => `${n} day(s)`, maxDays: `Max ${MAX_DAYS} days`,
     invalid: "From date must be on or before To date", future: "Future dates are not allowed",
-    queued: "Waiting for worker...", scanning: "Scanning MES", importing: "Importing into DYS",
+    queued: "Waiting for worker...", queuedAhead: (n: number) => `In queue — ${n} ahead of you`, scanning: "Scanning MES", importing: "Importing into DYS",
     workerOff: "SMS worker is offline — the job will run when it comes back",
     imported: "Imported", failed: "Failed", done: "Done", noFile: "No file to import",
   },
@@ -74,6 +74,8 @@ interface Props {
 type FileResult = { file: SmsFile; ok: boolean; message: string };
 
 export default function ProductionRunButton({ lang = "vi", username, onImported }: Props) {
+  // Token SMS gắn với người bấm (mỗi API key chỉ 1 người dùng / 1 phiên)
+  useEffect(() => { if (username) setSmsUsername(username); }, [username]);
   const t = TEXT[lang];
   const today = todayVN();
   const [open, setOpen] = useState(false);
@@ -138,13 +140,15 @@ export default function ProductionRunButton({ lang = "vi", username, onImported 
         body: JSON.stringify({ date_from: from, date_to: to }),
       }, username);
       setRun(r);
+      // Không còn 409: có người đang chạy thì yêu cầu này xếp hàng, ai bấm trước chạy trước
+      setPhase(r.queue_ahead ? t.queuedAhead(r.queue_ahead) : t.queued);
 
       // 2. Theo dõi tới khi xong (token tự gia hạn nếu quá 15 phút)
       while (!r.finished && !cancelled.current) {
         await sleep(POLL_MS);
         r = await smsJson<SmsRun>(getSmsApiKey, `/api/runs/${r.id}`);
         setRun(r);
-        setPhase(r.status === "queued" ? t.queued : t.scanning);
+        setPhase(r.status === "queued" ? (r.queue_ahead ? t.queuedAhead(r.queue_ahead) : t.queued) : t.scanning);
       }
       if (cancelled.current) return;
 

@@ -1,13 +1,13 @@
 """Gộp router của các app thành một API: /api/...
 
 Mọi API (trừ /api/health, /api/auth/session) cần token PHIÊN (tối đa 15 phút):
-  POST /api/auth/session {"api_key": "<khóa>"} → token
+  POST /api/auth/session {"api_key": "<khóa>", "username": "<user DYS>"} → token (mỗi khóa chỉ 1 phiên / 1 người)
   header Authorization: Bearer <token>   hoặc   ?token=<token>
 """
 from ninja import NinjaAPI
 
 from apps.core.api import auth_router, health_router, router as core_router
-from apps.core.security import API_AUTH
+from apps.core.security import API_AUTH, SessionError
 from apps.jobs.api import router as jobs_router
 from apps.plans.api import router as plans_router
 
@@ -23,3 +23,10 @@ api.add_router("/", auth_router)
 api.add_router("/", core_router)
 api.add_router("/", jobs_router)
 api.add_router("/", plans_router)
+
+
+@api.exception_handler(SessionError)
+def session_error(request, exc: SessionError):
+    """401 của phiên kèm mã: SESSION_EXPIRED / SESSION_INVALID (DYS tự tạo phiên mới),
+    SESSION_REPLACED / SESSION_USER_MISMATCH / SESSION_REVOKED (báo người dùng, không tự đăng nhập lại)"""
+    return api.create_response(request, {"detail": exc.message, "code": exc.code}, status=401)

@@ -23,6 +23,8 @@ class SheetError(AgentError):
 
 # Mã lỗi -> (tiêu đề ngắn, cách xử lý)
 ERROR_HINTS: dict[str, tuple[str, str]] = {
+    "WORKER_INTERRUPTED": ("Lần chạy bị dừng giữa chừng",
+                           "Worker khởi động lại hoặc mất kết nối database khi đang chạy. Bấm chạy lại job."),
     "AGENT_NOT_WINDOWS": ("Agent không chạy trên Windows",
                           "Job thao tác MES phải do worker trên máy Windows có MESClient chạy (python manage.py run_worker)."),
     "MES_NOT_RUNNING": ("MESClient chưa mở",

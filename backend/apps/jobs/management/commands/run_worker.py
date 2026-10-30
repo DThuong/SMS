@@ -6,20 +6,55 @@ Mỗi vòng lặp (mặc định 5 giây):
      (vd "0 8 * * *": từ 08:00 hôm nay tới 08:00 hôm sau). Kỳ này chưa có → tạo ngay, kể cả khi máy
      bật trễ (9h, 15h, 3h sáng hôm sau...). Đã có (thành công hay lỗi) → không tạo thêm; chạy lại thì gọi API.
   3. Lấy JobRun đang chờ (queued) cũ nhất -> chạy. Chỉ 1 job chạy tại một thời điểm.
+Trong lúc chạy job (có thể vài chục phút), một luồng phụ vẫn cập nhật heartbeat mỗi 5 giây → API không báo
+nhầm "worker tắt". Mất kết nối MySQL (MySQL khởi động lại, mạng chập chờn) → worker KHÔNG chết: ghi lỗi, chờ rồi
+nối lại, lần chạy bị dở được đánh dấu lỗi để không chặn hàng đợi.
 Dừng: Ctrl+C
 """
 import os
 import socket
+import threading
 import time
+import traceback
 
 from django.core.management.base import BaseCommand
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 from django.utils import timezone
 
 from apps.jobs.models import Job, JobRun, WorkerStatus, cron_period
 from apps.jobs.runner import execute
 
 PENDING = [JobRun.Status.QUEUED, JobRun.Status.RUNNING]
+RETRY_SECONDS = 15          # mất kết nối DB → chờ bấy nhiêu giây rồi thử lại
+
+
+class Heartbeat(threading.Thread):
+    """Luồng phụ cập nhật worker_status.last_seen trong lúc luồng chính đang chạy job (dùng kết nối DB riêng)"""
+
+    def __init__(self, interval: int):
+        super().__init__(daemon=True, name="sms-heartbeat")
+        self.interval = interval
+        self.stopped = threading.Event()
+
+    def run(self):
+        try:
+            while not self.stopped.wait(self.interval):
+                try:
+                    WorkerStatus.objects.filter(pk=1).update(last_seen=timezone.now())
+                except Exception:
+                    close_old_connections()
+        finally:
+            connection.close()
+
+    def stop(self):
+        self.stopped.set()
+        self.join(timeout=self.interval + 5)
+
+
+def _fail_stale_runs(reason: str) -> int:
+    """Chỉ có 1 worker → lúc worker rảnh mà còn lần chạy 'running' thì đó là lần chạy bị dở"""
+    return JobRun.objects.filter(status=JobRun.Status.RUNNING).update(
+        status=JobRun.Status.FAILED, finished_at=timezone.now(), error=reason, error_code="WORKER_INTERRUPTED")
 
 
 class Command(BaseCommand):
@@ -30,9 +65,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, interval, **opts):
         now = timezone.now()
-        stale = JobRun.objects.filter(status=JobRun.Status.RUNNING)
-        n = stale.update(status=JobRun.Status.FAILED, finished_at=now,
-                         error="Worker khởi động lại khi job đang chạy")
+        n = _fail_stale_runs("Worker khởi động lại khi job đang chạy")
         if n:
             self.stdout.write(self.style.WARNING(f"Đánh dấu {n} lần chạy dang dở là lỗi"))
 
@@ -41,21 +74,46 @@ class Command(BaseCommand):
             "started_at": now, "last_seen": now, "current_run": None})
         self.stdout.write(self.style.SUCCESS(f"Worker đã chạy (mỗi {interval}s). Ctrl+C để dừng."))
 
+        self.interval = interval
+        recovering = False
         try:
             while True:
-                close_old_connections()   # tránh lỗi "MySQL server has gone away"
-                self._beat(None)
-                self._schedule_due_jobs()
-                run = (JobRun.objects.select_related("job")
-                       .filter(status=JobRun.Status.QUEUED).order_by("id").first())
-                if run:
-                    self._beat(run)
-                    execute(run)
+                try:
+                    close_old_connections()   # tránh lỗi "MySQL server has gone away"
+                    if recovering:
+                        n = _fail_stale_runs("Mất kết nối database khi đang chạy job — hãy chạy lại")
+                        self.stdout.write(self.style.SUCCESS(f"Đã nối lại database (đánh dấu {n} lần chạy dở là lỗi)"))
+                        recovering = False
                     self._beat(None)
-                    continue          # có job chờ tiếp thì chạy luôn
+                    self._schedule_due_jobs()
+                    run = (JobRun.objects.select_related("job")
+                           .filter(status=JobRun.Status.QUEUED).order_by("id").first())
+                    if run:
+                        self._run(run)
+                        continue          # có job chờ tiếp thì chạy luôn
+                except Exception:
+                    # Lỗi DB / lỗi bất ngờ: KHÔNG để worker chết (máy MES chạy không người trông)
+                    recovering = True
+                    self.stderr.write(f"Worker gặp lỗi, thử lại sau {RETRY_SECONDS}s:\n{traceback.format_exc(limit=3)}")
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+                    time.sleep(RETRY_SECONDS)
+                    continue
                 time.sleep(interval)
         except KeyboardInterrupt:
             self.stdout.write("Đã dừng worker.")
+
+    def _run(self, run):
+        self._beat(run)
+        hb = Heartbeat(self.interval)
+        hb.start()
+        try:
+            execute(run)
+        finally:
+            hb.stop()
+        self._beat(None)
 
     def _beat(self, run):
         WorkerStatus.objects.filter(pk=1).update(last_seen=timezone.now(), current_run=run)

@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from apps.core.models import Oper, get_setting
 
-from .models import File, WorkOrder
+from .models import File
 from .services import delete_file_on_disk, production_target, register_production_file, save_export
 
 
@@ -38,7 +38,7 @@ def _load_collector(name: str):
 
 
 def workorder_plan(run, log):
-    """MES → View Work Order → từng Oper → lưu file + DB"""
+    """MES → View Work Order → từng Oper → lưu file (DYS tải về import)"""
     WorkOrderCollector = _load_collector("workorder")
 
     codes = (run.params or {}).get("opers")
@@ -71,7 +71,7 @@ def workorder_plan(run, log):
             log.info("Oper %s %s: %d dòng (bảng xuất có %d dòng của các xưởng: %s)", oper.code, oper.name,
                      len(df), len(df_all), ", ".join(sorted(collector.opers_in(df_all))) or "-")
             ef = save_export(run, oper, df, export_dt)
-            log.info("Đã lưu %s (%d dòng) vào file + DB", ef.file_path, ef.rows)
+            log.info("Đã lưu %s (%d dòng) — sẵn sàng cho DYS tải về import", ef.file_path, ef.rows)
             total += ef.rows
         except Exception as e:
             errors.append(f"{oper.code} {oper.name}: {e}")
@@ -135,7 +135,11 @@ def production_output(run, log):
         try:
             path, rows, export_dt = collector.collect(d, production_target(d))
             report = register_production_file(run, d, path, rows, export_dt)
-            log.info("Đã lưu %s (%d dòng dữ liệu) — sẵn sàng cho DYS tải về import", path.name, report.rows)
+            if report.rows == 0:
+                log.warning("File %s không có dòng dữ liệu nào — MES chưa tải xong (tăng mes_view_wait_seconds) "
+                            "hoặc ngày %s chưa có sản lượng", path.name, d.strftime("%d/%m/%Y"))
+            else:
+                log.info("Đã lưu %s (%d dòng dữ liệu) — sẵn sàng cho DYS tải về import", path.name, report.rows)
             total += report.rows
         except Exception as e:
             errors.append(f"{d:%d/%m/%Y}: {e}")
@@ -152,7 +156,6 @@ def cleanup(run, log):
     """
     Xóa dữ liệu cũ hơn `data_retention_days` ngày (mặc định 3):
       - file sản lượng + file kế hoạch: xóa file trên ổ đĩa VÀ dòng trong bảng files
-      - dòng work_orders đi theo file (CASCADE)
       - ảnh màn hình lỗi cũ
     """
     days = max(1, get_setting("data_retention_days", 3))
@@ -164,12 +167,11 @@ def cleanup(run, log):
     counts = {}
     for kind, label in File.Kind.choices:
         counts[kind] = old.filter(kind=kind).count()
-    n_wo = WorkOrder.objects.filter(file__in=old).count()
     for f in old.filter(file_deleted=False):
         delete_file_on_disk(f)                 # xóa file .xlsx/.xls trên ổ đĩa trước
-    n_files, _ = old.delete()                  # rồi xóa dòng files (work_orders xóa theo CASCADE)
-    log.info("Đã xóa %d file sản lượng, %d file kế hoạch, %d dòng Work Order",
-             counts.get(File.Kind.PRODUCTION, 0), counts.get(File.Kind.WORKORDER, 0), n_wo)
+    n_files, _ = old.delete()                  # rồi xóa dòng files
+    log.info("Đã xóa %d file sản lượng, %d file kế hoạch",
+             counts.get(File.Kind.PRODUCTION, 0), counts.get(File.Kind.WORKORDER, 0))
 
     n_shots = 0
     shot_dir = settings.SCREENSHOT_DIR
@@ -179,4 +181,4 @@ def cleanup(run, log):
                 p.unlink(missing_ok=True)
                 n_shots += 1
     log.info("Đã xóa %d ảnh lỗi cũ", n_shots)
-    return sum(counts.values()) + n_wo
+    return sum(counts.values())

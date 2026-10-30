@@ -1,22 +1,22 @@
 """API: sức khỏe, phiên đăng nhập bằng API key, xưởng (opers), cài đặt (settings), hạn lưu dữ liệu, dashboard"""
 from datetime import timedelta
 
-from django.db.models import Count, Sum
-from django.db.models.functions import TruncDate
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from ninja import Router, Schema
 from ninja.errors import HttpError
 
-from .models import Oper, Setting, get_setting
-from .security import create_session, session_minutes, verify_key
+from .models import ApiKey, Oper, Setting, get_setting
+from .security import create_session, end_session, request_token, session_minutes, verify_key
+from .timeutil import day_end, day_start
 
 router = Router(tags=["Core"])
 health_router = Router(tags=["Health"])
 auth_router = Router(tags=["Auth"])
 
 
-@health_router.get("/health", auth=None)
+@health_router.get("/health", auth=None, summary="Kiểm tra API + database còn sống")
 def health(request):
     """Kiểm tra API + database còn sống (dùng cho Docker healthcheck / Cloudflare)"""
     from django.db import connection
@@ -25,27 +25,50 @@ def health(request):
     return {"ok": True, "time": timezone.localtime()}
 
 
-# ---------------- Phiên (API key → token 15 phút) ----------------
+# ---------------- Phiên (API key → token 15 phút, mỗi khóa chỉ 1 phiên) ----------------
 class SessionIn(Schema):
     api_key: str
+    username: str = ""        # user DYS đang đăng nhập — token chỉ dùng được cho người này (bỏ trống = X-Requested-By)
 
 
-@auth_router.post("/auth/session", auth=None)
+def _session_state(key, request) -> dict:
+    now = timezone.now()
+    exp = key.session_expires_at
+    return {"ok": True, "name": key.name, "user": getattr(request, "sms_user", "") or key.session_user,
+            "started_at": key.session_started_at, "expires_at": exp, "server_time": now,
+            "remaining_seconds": max(0, int((exp - now).total_seconds())) if exp else 0,
+            "session_minutes": session_minutes()}
+
+
+@auth_router.post("/auth/session", auth=None, summary="Đổi API key lấy token phiên (15 phút, 1 người / khóa)")
 def create_api_session(request, data: SessionIn):
     """
-    Đổi API key lấy token phiên (hạn `session_minutes`, mặc định 15 phút).
-    Gửi token ở header `Authorization: Bearer <token>` cho mọi API khác. Hết hạn → gọi lại API này.
+    Đổi API key lấy token phiên (hạn `session_minutes`, mặc định 15 phút). Gửi token ở header
+    `Authorization: Bearer <token>` cho mọi API khác.
+
+    **Mỗi API key chỉ 1 phiên / 1 người:** tạo phiên mới thì phiên cũ (nếu còn hạn) bị thay thế ngay —
+    người đang dùng phiên cũ nhận 401 `SESSION_REPLACED`. `replaced` cho biết phiên của ai vừa bị thay.
+    Token gắn với `username`; gửi `X-Requested-By` khác username → 401 `SESSION_USER_MISMATCH`.
+    Dùng `expires_at` + `server_time` để hiển thị đồng hồ đếm ngược (trừ lệch giờ máy khách).
     """
     key = verify_key(data.api_key)
     if not key:
         raise HttpError(401, "API key sai hoặc đã bị khóa")
-    return create_session(key)
+    user = (data.username or request.headers.get("X-Requested-By") or "").strip() or key.name
+    return create_session(key, user)
 
 
-@auth_router.get("/auth/session")
+@auth_router.get("/auth/session", summary="Thời gian còn lại của phiên (đồng hồ đếm ngược)")
 def current_session(request):
-    """Kiểm tra token hiện tại còn dùng được không (401 = hết hạn/không hợp lệ)"""
-    return {"ok": True, "name": request.auth.name, "session_minutes": session_minutes()}
+    """Phiên còn dùng được không + `expires_at`, `remaining_seconds`, `server_time`, người đang dùng (401 = hết hạn / bị thay)"""
+    key = ApiKey.objects.get(pk=request.auth.pk)
+    return _session_state(key, request)
+
+
+@auth_router.delete("/auth/session", summary="Đăng xuất (kết thúc phiên hiện tại)")
+def logout_session(request):
+    """Kết thúc phiên đang dùng → API key trống phiên, người khác đăng nhập ngay được"""
+    return {"ok": end_session(request.auth, request_token(request))}
 
 
 # ---------------- Oper ----------------
@@ -62,19 +85,19 @@ class OperOut(OperIn):
     id: int
 
 
-@router.get("/opers", response=list[OperOut], tags=["Oper"])
+@router.get("/opers", response=list[OperOut], tags=["Oper"], summary="Danh sách xưởng (Oper)")
 def list_opers(request):
     return Oper.objects.all()
 
 
-@router.post("/opers", response=OperOut, tags=["Oper"])
+@router.post("/opers", response=OperOut, tags=["Oper"], summary="Thêm xưởng")
 def create_oper(request, data: OperIn):
     if Oper.objects.filter(code=data.code).exists():
         raise HttpError(400, f"Mã Oper {data.code} đã tồn tại")
     return Oper.objects.create(**data.dict())
 
 
-@router.put("/opers/{code}", response=OperOut, tags=["Oper"])
+@router.put("/opers/{code}", response=OperOut, tags=["Oper"], summary="Sửa xưởng")
 def update_oper(request, code: str, data: OperIn):
     oper = get_object_or_404(Oper, code=code)
     if data.code != code and Oper.objects.filter(code=data.code).exists():
@@ -85,7 +108,7 @@ def update_oper(request, code: str, data: OperIn):
     return oper
 
 
-@router.delete("/opers/{code}", tags=["Oper"])
+@router.delete("/opers/{code}", tags=["Oper"], summary="Xóa xưởng (chưa có file)")
 def delete_oper(request, code: str):
     oper = get_object_or_404(Oper, code=code)
     if oper.files.exists():
@@ -114,12 +137,12 @@ class SettingIn(Schema):
     value: str
 
 
-@router.get("/settings", response=list[SettingOut], tags=["Setting"])
+@router.get("/settings", response=list[SettingOut], tags=["Setting"], summary="Danh sách cài đặt agent")
 def list_settings(request):
     return [_setting_out(s) for s in Setting.objects.all()]
 
 
-@router.put("/settings/{key}", response=SettingOut, tags=["Setting"])
+@router.put("/settings/{key}", response=SettingOut, tags=["Setting"], summary="Sửa một cài đặt")
 def update_setting(request, key: str, data: SettingIn):
     s = get_object_or_404(Setting, key=key)
     value = data.value.strip()
@@ -163,13 +186,13 @@ def _retention_out() -> dict:
     }
 
 
-@router.get("/retention", tags=["Retention"])
+@router.get("/retention", tags=["Retention"], summary="Xem số ngày giữ dữ liệu")
 def get_retention(request):
     """Số ngày giữ dữ liệu hiện tại + lịch dọn + số file sắp bị xóa"""
     return _retention_out()
 
 
-@router.put("/retention", tags=["Retention"])
+@router.put("/retention", tags=["Retention"], summary="Đổi số ngày giữ dữ liệu")
 def update_retention(request, data: RetentionIn):
     """
     Đổi số ngày giữ dữ liệu sản lượng & kế hoạch (mặc định 3).
@@ -184,7 +207,7 @@ def update_retention(request, data: RetentionIn):
 
 
 # ---------------- Dashboard ----------------
-@router.get("/dashboard", tags=["Dashboard"])
+@router.get("/dashboard", tags=["Dashboard"], summary="Tổng quan: worker, job, file hôm nay")
 def dashboard(request):
     from apps.jobs.api import _job_out, _run_out
     from apps.jobs.models import Job, JobRun, WorkerStatus
@@ -195,24 +218,31 @@ def dashboard(request):
     today = now.date()
     workorders = File.objects.filter(kind=File.Kind.WORKORDER)
 
-    # Số dòng kế hoạch lấy được hôm nay theo xưởng (file mới nhất trong ngày)
+    # Số dòng kế hoạch lấy được hôm nay theo xưởng (file mới nhất trong ngày) — 1 truy vấn cho mọi xưởng
+    latest = {}
+    for f in (workorders.filter(export_date__gte=day_start(today), export_date__lt=day_end(today))
+              .order_by("oper_id", "-export_date").values("oper_id", "rows", "export_date")):
+        latest.setdefault(f["oper_id"], f)
     today_by_oper = []
     for oper in Oper.objects.filter(is_active=True):
-        f = workorders.filter(oper=oper, export_date__date=today).order_by("-export_date").first()
+        f = latest.get(oper.id)
         today_by_oper.append({"oper": oper.code, "name": oper.name,
-                              "rows": f.rows if f else 0, "export_date": f.export_date if f else None})
+                              "rows": f["rows"] if f else 0, "export_date": f["export_date"] if f else None})
 
-    since = today - timedelta(days=13)
-    daily = (workorders.filter(export_date__date__gte=since)
-             .annotate(day=TruncDate("export_date"))
-             .values("day", "oper__code").annotate(rows=Sum("rows")).order_by("day"))
+    # 14 ngày gần nhất: gom theo ngày (giờ VN) bằng Python — không dùng TruncDate (MySQL thiếu bảng múi giờ)
+    sums = {}
+    for f in (workorders.filter(export_date__gte=day_start(today - timedelta(days=13)))
+              .values_list("export_date", "oper__code", "rows")):
+        k = (timezone.localtime(f[0]).date(), f[1])
+        sums[k] = sums.get(k, 0) + (f[2] or 0)
+    daily = [{"day": d, "oper__code": o, "rows": n} for (d, o), n in sorted(sums.items())]
 
     runs_7d = (JobRun.objects.filter(created_at__gte=now - timedelta(days=7))
                .values("status").annotate(n=Count("id")))
 
     ws = WorkerStatus.objects.filter(pk=1).first()
-    production_today = (File.objects.filter(kind=File.Kind.PRODUCTION, report_date=today)
-                        .order_by("-id").first())
+    production_today = (File.objects.select_related("oper")
+                        .filter(kind=File.Kind.PRODUCTION, report_date=today).order_by("-id").first())
     return {
         "now": now,
         "worker": {"online": WorkerStatus.is_online(), "last_seen": ws.last_seen if ws else None,

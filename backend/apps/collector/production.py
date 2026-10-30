@@ -37,9 +37,16 @@ def _children(h: int) -> list[int]:
 
 def count_data_rows(path: Path) -> int:
     """Đếm số dòng dữ liệu trong file MES xuất (bỏ dòng tiêu đề và dòng trống)"""
-    try:
-        df = pd.read_excel(path, header=None)
-    except Exception:
+    df = None
+    for _ in range(5):                      # MES vừa ghi xong có thể còn giữ file vài giây
+        try:
+            df = pd.read_excel(path, header=None)
+            break
+        except PermissionError:
+            time.sleep(1)
+        except Exception:
+            return 0
+    if df is None:
         return 0
     df = df.dropna(how="all")
     return max(len(df) - 1, 0)

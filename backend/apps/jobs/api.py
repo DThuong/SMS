@@ -22,12 +22,15 @@ Luồng kế hoạch Work Order cho DYS (mỗi xưởng một file):
   1. POST /api/jobs/WORKORDER_PLAN/run {"opers": ["2010", "3010"], "wait_seconds": 90}   (bỏ opers = mọi xưởng)
   2. finished=false → gọi GET /api/runs/{id} tới khi finished=true
      status: success = đủ xưởng · partial = có xưởng lỗi (xem error) · failed = không lấy được xưởng nào
-  3. files[] — mỗi xưởng 1 phần tử (oper, rows, id) → GET /api/workorders?oper=2010&file_id={id}&page_size=1000
+  3. files[] — mỗi xưởng 1 file (oper, rows, id) → tải download_url → DYS import vào DB của DYS
+  4. Mỗi file: POST /api/files/{file_id}/import-result {"success": true, "message": "..."}
 """
 import time
 from datetime import date
 
 from croniter import croniter
+from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from ninja import Query, Router, Schema
@@ -35,6 +38,7 @@ from ninja.errors import HttpError
 
 from apps.collector.errors import error_info
 from apps.core.security import requested_by
+from apps.core.timeutil import filter_days
 
 from .models import Job, JobRun, WorkerStatus, cron_period
 
@@ -68,7 +72,7 @@ def _period_out(job: Job) -> dict:
                                                   "created_at": sr.created_at, "finished_at": sr.finished_at}}
 
 
-@router.get("/jobs")
+@router.get("/jobs", summary="Danh sách job + lịch + kỳ hiện tại")
 def list_jobs(request):
     return [_job_out(j) for j in Job.objects.all()]
 
@@ -79,7 +83,7 @@ class JobIn(Schema):
     params: dict = {}
 
 
-@router.put("/jobs/{code}")
+@router.put("/jobs/{code}", summary="Sửa lịch / bật tắt job")
 def update_job(request, code: str, data: JobIn):
     if not croniter.is_valid(data.cron):
         raise HttpError(400, f"Biểu thức cron không hợp lệ: {data.cron}")
@@ -122,15 +126,15 @@ def _report_dates(data: RunIn) -> list[date]:
     return [start + timedelta(days=i) for i in range(n)]
 
 
-@router.post("/jobs/{code}/run")
+@router.post("/jobs/{code}/run", summary="Chạy job ngay (sản lượng theo ngày / khoảng ngày, kế hoạch theo xưởng)")
 def run_job(request, code: str, data: RunIn):
-    """Đưa job vào hàng đợi, worker chạy ngay ở vòng lặp kế tiếp (≤5s). Header X-Requested-By = người bấm bên DYS"""
+    """
+    Đưa yêu cầu vào HÀNG CHỜ (không bao giờ trả 409 vì đang bận). Ai bấm trước chạy trước; đang có job chạy thì
+    yêu cầu này chờ tới lượt — xem `queue_ahead` (số lần chạy đứng trước) trong kết quả / GET /api/runs/{id}.
+    Header X-Requested-By = người bấm bên DYS.
+    """
     job = get_object_or_404(Job, code=code)
     report_dates = _report_dates(data)
-    pending = job.runs.filter(status__in=PENDING).order_by("id").first()
-    if pending:
-        raise HttpError(409, f"Job đang chờ/đang chạy (run id={pending.id}). Theo dõi: GET /api/runs/{pending.id}")
-
     params = dict(job.params or {})
     if report_dates:
         params.pop("report_date", None)
@@ -143,6 +147,9 @@ def run_job(request, code: str, data: RunIn):
         if unknown:
             raise HttpError(400, f"Mã xưởng không có hoặc đang tắt: {', '.join(unknown)}. Xem GET /api/opers")
         params["opers"] = codes
+    # HÀNG CHỜ: không từ chối khi đang có job chạy — mọi yêu cầu đều được xếp hàng.
+    # id tự tăng = thứ tự bấm; worker luôn lấy lần chạy `queued` có id nhỏ nhất → ai bấm trước chạy trước,
+    # người sau chờ tới lượt (kể cả khác job: 1 worker chỉ điều khiển 1 MESClient tại một thời điểm).
     run = JobRun.objects.create(job=job, trigger=JobRun.Trigger.API, params=params,
                                 requested_by=requested_by(request))
 
@@ -157,6 +164,14 @@ def run_job(request, code: str, data: RunIn):
 
 
 # ======================= LẦN CHẠY =======================
+def queue_ahead(r: JobRun) -> int | None:
+    """Số lần chạy đứng TRƯỚC lần này trong hàng chờ (đang chạy + đang chờ có id nhỏ hơn). None nếu không còn chờ"""
+    if r.status != JobRun.Status.QUEUED:
+        return None
+    return JobRun.objects.filter(
+        Q(status=JobRun.Status.RUNNING) | Q(status=JobRun.Status.QUEUED, id__lt=r.id)).count()
+
+
 def _run_out(r: JobRun) -> dict:
     return {
         "id": r.id, "job": r.job.code, "job_name": r.job.name,
@@ -166,6 +181,7 @@ def _run_out(r: JobRun) -> dict:
         "error": r.error, "error_info": error_info(r.error_code),
         "created_at": r.created_at, "started_at": r.started_at, "finished_at": r.finished_at,
         "duration_seconds": r.duration_seconds,
+        "queue_ahead": queue_ahead(r),      # 0 = chạy ngay khi worker rảnh; 2 = còn 2 lần chạy phía trước
     }
 
 
@@ -186,6 +202,19 @@ def _run_detail(r: JobRun) -> dict:
     }
 
 
+
+@router.get("/queue", summary="Hàng chờ: lần đang chạy + các lần đang chờ theo thứ tự")
+def get_queue(request):
+    """Thứ tự thực hiện hiện tại: phần tử đầu là lần đang chạy (nếu có), sau đó các lần chờ theo thứ tự bấm"""
+    running = list(JobRun.objects.select_related("job").filter(status=JobRun.Status.RUNNING).order_by("id"))
+    queued = list(JobRun.objects.select_related("job").filter(status=JobRun.Status.QUEUED).order_by("id"))
+    items = []
+    for i, r in enumerate(running + queued):
+        items.append({"position": i, "id": r.id, "job": r.job.code, "job_name": r.job.name, "status": r.status,
+                      "requested_by": r.requested_by, "trigger": r.trigger, "params": r.params,
+                      "created_at": r.created_at, "started_at": r.started_at})
+    return {"worker_online": WorkerStatus.is_online(), "running": len(running), "waiting": len(queued), "items": items}
+
 class RunFilter(Schema):
     job: str | None = None              # mã job
     status: JobRun.Status | None = None
@@ -195,17 +224,14 @@ class RunFilter(Schema):
     page_size: int = 20
 
 
-@router.get("/runs")
+@router.get("/runs", summary="Lịch sử chạy (lọc job, trạng thái, ngày)")
 def list_runs(request, f: Query[RunFilter]):
     qs = JobRun.objects.select_related("job")
     if f.job:
         qs = qs.filter(job__code=f.job)
     if f.status:
         qs = qs.filter(status=f.status)
-    if f.date_from:
-        qs = qs.filter(created_at__date__gte=f.date_from)
-    if f.date_to:
-        qs = qs.filter(created_at__date__lte=f.date_to)
+    qs = filter_days(qs, "created_at", f.date_from, f.date_to)
     total = qs.count()
     size = max(1, min(f.page_size, 100))
     page = max(f.page, 1)
@@ -214,20 +240,21 @@ def list_runs(request, f: Query[RunFilter]):
             "items": [_run_out(r) for r in qs.order_by("-id")[start:start + size]]}
 
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{int:run_id}", summary="Chi tiết 1 lần chạy + nhật ký + file")
 def get_run(request, run_id: int):
+    """Chi tiết 1 lần chạy: trạng thái, error_info, toàn bộ nhật ký, các file đã lấy, worker_online"""
     return _run_detail(get_object_or_404(JobRun, id=run_id))
 
 
-@router.get("/runs/{run_id}/logs")
+@router.get("/runs/{run_id}/logs", summary="Nhật ký mới của lần chạy (after_seq)")
 def get_run_logs(request, run_id: int, after_seq: int = 0):
     """Gọi định kỳ với after_seq = seq lớn nhất đã có để chỉ lấy dòng nhật ký mới"""
     r = get_object_or_404(JobRun, id=run_id)
-    return {"status": r.status, "finished": r.status in FINAL,
+    return {"status": r.status, "finished": r.status in FINAL, "queue_ahead": queue_ahead(r),
             "logs": [_log_out(r, lg) for lg in r.logs.filter(seq__gt=after_seq).order_by("seq")]}
 
 
-@router.get("/runs/{run_id}/logs/{seq}/screenshot")
+@router.get("/runs/{run_id}/logs/{seq}/screenshot", summary="Ảnh màn hình lúc lỗi")
 def log_screenshot(request, run_id: int, seq: int):
     from django.conf import settings
     from django.http import FileResponse
@@ -238,3 +265,75 @@ def log_screenshot(request, run_id: int, seq: int):
     if not lg.screenshot or not path.is_file() or settings.STORAGE_DIR.resolve() not in path.parents:
         raise HttpError(404, "Không có ảnh")
     return FileResponse(open(path, "rb"), content_type="image/png")
+
+
+# ======================= XÓA LỊCH SỬ CHẠY =======================
+def _delete_runs(qs) -> dict:
+    """Xóa các lần chạy (đã kết thúc) + nhật ký (CASCADE) + ảnh lỗi trên ổ đĩa. File MES giữ lại (run_id → null)"""
+    from django.conf import settings
+
+    from .models import JobLog
+
+    qs = qs.filter(status__in=FINAL)
+    ids = list(qs.values_list("id", flat=True))
+    if not ids:
+        return {"deleted_runs": 0, "deleted_logs": 0, "deleted_screenshots": 0, "ids": []}
+    shots = [s for s in JobLog.objects.filter(run_id__in=ids).exclude(screenshot="")
+             .values_list("screenshot", flat=True)]
+    n_logs = JobLog.objects.filter(run_id__in=ids).count()
+    WorkerStatus.objects.filter(current_run_id__in=ids).update(current_run=None)
+    with transaction.atomic():
+        JobRun.objects.filter(id__in=ids).delete()
+    root = settings.STORAGE_DIR.resolve()
+    n_shots = 0
+    for rel in set(shots):
+        p = (settings.STORAGE_DIR / rel).resolve()
+        if root in p.parents and p.is_file():
+            p.unlink(missing_ok=True)
+            n_shots += 1
+    return {"deleted_runs": len(ids), "deleted_logs": n_logs, "deleted_screenshots": n_shots, "ids": ids}
+
+
+@router.delete("/runs/{int:run_id}", summary="Xóa 1 lần chạy khỏi lịch sử")
+def delete_run(request, run_id: int):
+    """
+    Xóa 1 lần chạy khỏi lịch sử (kèm nhật ký + ảnh lỗi). Lần chạy đang chờ/đang chạy → 409.
+    File lấy từ MES của lần chạy đó KHÔNG bị xóa (vẫn xem/tải ở /api/files).
+    """
+    r = get_object_or_404(JobRun, id=run_id)
+    if r.status not in FINAL:
+        raise HttpError(409, f"Lần chạy #{r.id} đang {r.get_status_display().lower()} — chờ xong rồi mới xóa được")
+    return _delete_runs(JobRun.objects.filter(id=r.id))
+
+
+class RunDeleteIn(Schema):
+    ids: list[int] | None = None        # xóa đúng các id này (vd các dòng tích chọn trên DYS)
+    job: str | None = None              # hoặc theo bộ lọc giống GET /api/runs
+    status: JobRun.Status | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+    all: bool = False                   # true = xóa toàn bộ lịch sử (bắt buộc khi không có điều kiện nào)
+
+
+@router.post("/runs/delete", summary="Xóa nhiều lần chạy (ids / bộ lọc / all)")
+def delete_runs(request, data: RunDeleteIn):
+    """
+    Xóa nhiều lần chạy một lúc. Truyền `ids`, hoặc bộ lọc (`job`, `status`, `date_from`, `date_to`),
+    hoặc `all: true` để xóa hết. Không có điều kiện nào → 400 (tránh lỡ tay xóa sạch).
+    Lần chạy đang chờ/đang chạy luôn được bỏ qua. Trả về số lần chạy / dòng nhật ký / ảnh lỗi đã xóa.
+    """
+    has_filter = bool(data.ids or data.job or data.status or data.date_from or data.date_to)
+    if not has_filter and not data.all:
+        raise HttpError(400, "Cần ít nhất một điều kiện (ids, job, status, date_from, date_to) hoặc all=true")
+    if data.status and data.status not in FINAL:
+        raise HttpError(400, "Chỉ xóa được lần chạy đã kết thúc (success, partial, failed)")
+    qs = JobRun.objects.all()
+    if data.ids:
+        qs = qs.filter(id__in=data.ids)
+    if data.job:
+        qs = qs.filter(job__code=data.job)
+    if data.status:
+        qs = qs.filter(status=data.status)
+    qs = filter_days(qs, "created_at", data.date_from, data.date_to)
+    skipped = qs.exclude(status__in=FINAL).count()
+    return {**_delete_runs(qs), "skipped_pending": skipped}

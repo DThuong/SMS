@@ -7,7 +7,7 @@ from apps.jobs.models import JobRun
 class File(models.Model):
     """
     Bảng `files` — mọi file một lần chạy job lấy từ MES:
-      kind = workorder  : file kế hoạch Work Order của 1 xưởng (oper) → các dòng nằm ở bảng work_orders
+      kind = workorder  : file kế hoạch Work Order của 1 xưởng (oper) → DYS tải về import rồi báo lại
       kind = production : file sản lượng theo giờ (TV) của 1 ngày (report_date) → DYS tải về import rồi báo lại
     """
     class Kind(models.TextChoices):
@@ -50,38 +50,3 @@ class File(models.Model):
     def __str__(self):
         return f"[{self.kind}] {self.file_name}"
 
-
-class WorkOrder(models.Model):
-    """Bảng `work_orders` — một dòng Work Order trong file kế hoạch (snapshot tại Export Date)"""
-    file = models.ForeignKey(File, on_delete=models.CASCADE, related_name="work_orders",
-                                    verbose_name="File kế hoạch")
-    oper = models.ForeignKey(Oper, on_delete=models.PROTECT, related_name="work_orders")
-    factory = models.CharField("Factory", max_length=20, blank=True)
-    work_order_no = models.CharField("Work Order", max_length=50, db_index=True)
-    f_code = models.CharField("F Code", max_length=50, blank=True)
-    material_desc = models.CharField("Material Desc", max_length=255, blank=True)
-    s_code = models.CharField("S Code", max_length=50, blank=True)
-    spec = models.CharField("SPEC", max_length=100, blank=True)
-    line = models.CharField("Line", max_length=20, blank=True, db_index=True)
-    real_line = models.CharField("REAL Line", max_length=20, blank=True)
-    rework_flag = models.CharField("Rework Flag", max_length=5, blank=True)
-    status = models.CharField("Work Order Status", max_length=50, blank=True)
-    wo_qty = models.IntegerField("Work Order Qty", null=True, blank=True)
-    input_qty = models.IntegerField("Input Qty", null=True, blank=True)
-    remain_qty = models.IntegerField("Remain Qty", null=True, blank=True)
-    oper_text = models.CharField("Oper (MES)", max_length=50, blank=True)
-    array = models.IntegerField("Array", null=True, blank=True)
-    start_time = models.DateTimeField("Start Time", null=True, blank=True)
-    stop_time = models.DateTimeField("Stop Time", null=True, blank=True)
-    end_time = models.DateTimeField("End Time", null=True, blank=True)
-    extra = models.JSONField("Cột khác", default=dict, blank=True)
-
-    class Meta:
-        db_table = "work_orders"
-        ordering = ["file", "id"]
-        indexes = [models.Index(fields=["oper", "file"])]
-        verbose_name = "Work Order"
-        verbose_name_plural = "Work Order"
-
-    def __str__(self):
-        return self.work_order_no

@@ -22,11 +22,12 @@ DYS tải file sản lượng từ SMS → tự gọi POST /api/ProductionResult
 backend/
 ├─ apps/core          Bảng api_keys, settings, opers — /api/health, /api/dashboard, /api/opers, /api/settings
 ├─ apps/jobs          Bảng jobs, job_runs, job_logs, worker_status — /api/jobs, /api/runs, worker
-├─ apps/plans         Bảng files, work_orders — /api/files, /api/workorders
+├─ apps/plans         Bảng files — /api/files (DYS tải file về import vào DB của DYS)
 ├─ apps/collector     Agent điều khiển MESClient (pywinauto + COM) — chỉ chạy trên Windows
 ├─ sql/               Tạo / làm mới DB, quyền Docker, API key
 └─ Dockerfile, docker-compose.yml, .dockerignore
 docs/tien-do/         Nhật ký tiến độ theo ngày
+docs/api/openapi.json Đặc tả OpenAPI (Swagger) của toàn bộ API — xem trực tiếp ở /api/docs
 ```
 
 ## 1. Cài đặt lần đầu / làm mới database
@@ -76,20 +77,31 @@ Tự chạy khi đăng nhập Windows: Task Scheduler → *At log on* → `backe
 Lệnh khác: `run_job PRODUCTION_OUTPUT`, `probe_form "<tiêu đề form>" --export`,
 `api_key add "Tên"` / `api_key list` / `api_key disable <id>` / `api_key enable <id>`.
 
-## 5. API key & phiên 15 phút
+## 5. API key & phiên 15 phút (mỗi khóa chỉ 1 người)
 API key **không gọi API trực tiếp** — chỉ dùng để đổi lấy **token phiên** có hạn `session_minutes` (mặc định **15 phút**):
 ```
-POST /api/auth/session   {"api_key": "<khóa>"}
-→ {"token": "...", "token_type": "Bearer", "expires_in": 900, "expires_at": "...", "name": "..."}
+POST /api/auth/session   {"api_key": "<khóa>", "username": "<user DYS>"}
+→ {"token": "...", "user": "admint", "expires_in": 900, "expires_at": "...", "server_time": "...", "replaced": null}
 ```
-Mọi API khác (trừ `/api/health`, `/api/auth/session`) gửi token bằng **một** trong hai cách:
+Mọi API khác (trừ `/api/health`, `POST /api/auth/session`) gửi token bằng **một** trong hai cách:
 - Header `Authorization: Bearer <token>` (khuyên dùng)
 - Query `?token=<token>` (khi không đặt được header, vd link tải file; log của SMS không ghi phần query)
 
-Hết hạn → API trả **401** `"Phiên đã hết hạn (15 phút)..."` → DYS gọi lại `POST /api/auth/session`.
-`GET /api/auth/session` kiểm tra token còn dùng được không. Khóa API key (`is_active=0`) → mọi phiên của khóa đó bị chặn ngay.
+**Mỗi API key chỉ 1 phiên / 1 người tại một thời điểm:**
+- Tạo phiên mới bằng cùng khóa → phiên cũ bị **thay thế ngay**; `replaced` cho biết phiên của ai vừa bị thay.
+- Token gắn với `username` lúc tạo; gửi `X-Requested-By` khác người đó → 401.
+- `GET /api/auth/session` → `remaining_seconds`, `expires_at`, `server_time`, `user` (dùng cho đồng hồ đếm ngược bên DYS).
+- `DELETE /api/auth/session` → đăng xuất, khóa trống phiên. `python manage.py api_key logout <id>` để kết thúc phiên từ máy chủ.
 
-Header tùy chọn `X-Requested-By: <username DYS>` để ghi ai thao tác (không gửi thì lấy tên gắn với khóa).
+401 của phiên trả `{"detail": "...", "code": "..."}`:
+
+| code | Khi nào | DYS xử lý |
+|---|---|---|
+| `SESSION_EXPIRED` | Quá 15 phút | Tự tạo phiên mới rồi gọi lại |
+| `SESSION_INVALID` | Token sai / hỏng | Tự tạo phiên mới |
+| `SESSION_REPLACED` | Khóa vừa đăng nhập nơi khác (hoặc đã đăng xuất) | Báo "bị thay thế bởi …", người dùng bấm **Dùng tại đây** — không tự giành lại |
+| `SESSION_USER_MISMATCH` | Token của người khác | Như trên |
+| `SESSION_REVOKED` | API key bị khóa (`is_active=0`) | Báo liên hệ quản trị |
 
 Tạo khóa: `python manage.py api_key add "Tên"` (in khóa ngẫu nhiên 1 lần), hoặc trong Workbench
 (chuỗi trong `SHA2(...)` chính là khóa điền vào DYS; DB chỉ lưu SHA-256 nên **không xem lại được khóa cũ**):
@@ -99,7 +111,7 @@ VALUES ('Tên người được cấp', SHA2('khoa-bi-mat', 256), 1, '', 0, UTC_
 ```
 
 ## 5b. Tự xóa dữ liệu cũ
-Job `CLEANUP` (mặc định 23:30 mỗi ngày) xóa **file trên ổ đĩa + dòng `files` + dòng `work_orders`** của file sản lượng
+Job `CLEANUP` (mặc định 23:30 mỗi ngày) xóa **file trên ổ đĩa + dòng `files`** của file sản lượng
 và file kế hoạch **cũ hơn `data_retention_days` ngày (mặc định 3)**, cùng ảnh lỗi cũ.
 - `GET /api/retention` — số ngày hiện tại, lịch dọn, số file sẽ bị xóa ở lần dọn tới
 - `PUT /api/retention` `{"days": 5}` — đổi số ngày (1–365); xóa ngay: `POST /api/jobs/CLEANUP/run`
@@ -108,20 +120,21 @@ và file kế hoạch **cũ hơn `data_retention_days` ngày (mặc định 3)**
 | Nhóm | API |
 |---|---|
 | Sức khỏe | `GET /api/health` (không cần khóa) |
-| Phiên | `POST /api/auth/session` (`api_key` → token 15 phút, không cần token), `GET /api/auth/session` |
+| Phiên | `POST /api/auth/session` (`api_key` + `username` → token 15 phút, mỗi khóa 1 phiên), `GET /api/auth/session` (thời gian còn lại), `DELETE /api/auth/session` (đăng xuất) |
 | Hạn lưu dữ liệu | `GET /api/retention`, `PUT /api/retention` (`days`) |
 | Tổng quan | `GET /api/dashboard` — worker sống không, job, kế hoạch hôm nay theo xưởng, file sản lượng hôm nay, lần chạy gần đây |
 | Job | `GET /api/jobs`, `PUT /api/jobs/{code}` (`cron`, `is_active`, `params`), `POST /api/jobs/{code}/run` (`report_date` hoặc `date_from`+`date_to` tối đa 31 ngày — mỗi ngày 1 file, `opers`, `wait_seconds`) |
+| Hàng chờ | `GET /api/queue` — lần đang chạy + các lần chờ theo thứ tự bấm (ai bấm trước chạy trước) |
 | Lần chạy | `GET /api/runs?job=&status=&date_from=&date_to=`, `GET /api/runs/{id}` (trạng thái + `error_info` + `logs` + `files`), `GET /api/runs/{id}/logs?after_seq=`, `GET /api/runs/{id}/logs/{seq}/screenshot` |
+| Xóa lịch sử chạy | `DELETE /api/runs/{id}` (đang chờ/chạy → 409), `POST /api/runs/delete` `{"ids": [..]}` hoặc bộ lọc `job/status/date_from/date_to` hoặc `{"all": true}` — xóa kèm nhật ký + ảnh lỗi, giữ file MES |
 | File | `GET /api/files?kind=workorder\|production&oper=&report_date=&status=`, `GET /api/files/{id}`, `GET /api/files/{id}/download`, `POST /api/files/{id}/import-result`, `DELETE /api/files/{id}?with_data=` |
-| Work Order | `GET /api/workorders?oper=2010&file_id=&line=&status=&q=` (bỏ `file_id` = file mới nhất) |
 | Cài đặt | `GET/POST /api/opers`, `PUT/DELETE /api/opers/{code}`, `GET /api/settings`, `PUT /api/settings/{key}` (mật khẩu MES trả về `******`) |
 
 Mã job: `PRODUCTION_OUTPUT` (sản lượng), `WORKORDER_PLAN` (kế hoạch WO), `CLEANUP` (dọn file cũ).
 
 ### Luồng sản lượng cho trang DYS
 1. `POST /api/jobs/PRODUCTION_OUTPUT/run` `{ "report_date": "2026-10-28", "wait_seconds": 90 }`
-   (bỏ `report_date` = hôm nay giờ VN; ngày tương lai → 400; đang chạy dở → 409 kèm run id)
+   (bỏ `report_date` = hôm nay giờ VN; ngày tương lai → 400; đang có job chạy → **xếp hàng chờ**, xem `queue_ahead`)
 2. `finished = false` → gọi `GET /api/runs/{id}` mỗi vài giây tới khi `finished = true`.
 3. `status = success` → `files[0].download_url` → tải file (.xlsx).
 4. DYS gọi `POST /api/ProductionResult/import?reportDate=...` (của DYS) với file + token người dùng.
@@ -134,11 +147,11 @@ Mã job: `PRODUCTION_OUTPUT` (sản lượng), `WORKORDER_PLAN` (kế hoạch WO
 `SHEET_APP_MISSING`, `SHEET_COM_ATTACH_FAILED`, `SHEET_EXPORT_TIMEOUT`, `SHEET_DATA_UNSTABLE`, `SHEET_READ_FAILED`,
 `AGENT_NOT_WINDOWS`, `INVALID_PARAMS`, `UNKNOWN` — tiêu đề + cách xử lý trong `apps/collector/errors.py`.
 
-## 7. Database (MySQL `sms`) — 9 bảng
+## 7. Database (MySQL `sms`) — 8 bảng
 ```
 jobs ──1:n──► job_runs ──1:n──► job_logs
                  │
-                 └──1:n──► files ──1:n──► work_orders
+                 └──1:n──► files
                               ▲ (file workorder thuộc 1 xưởng)
 opers ────────────────────────┘
 api_keys, settings, worker_status: bảng độc lập
@@ -153,7 +166,6 @@ api_keys, settings, worker_status: bảng độc lập
 | `job_logs` | **Nhật ký từng bước** của một lần chạy (+ ảnh lỗi) | Worker (mỗi dòng log) |
 | `worker_status` | 1 dòng: worker còn sống không, đang chạy lần nào | Worker mỗi 5 giây |
 | `files` | Mọi file lấy từ MES: `kind=workorder` (theo xưởng) hoặc `kind=production` (theo ngày, kèm kết quả DYS import) | Worker tạo; `import-result` cập nhật |
-| `work_orders` | Từng dòng Work Order trong một file `kind=workorder` | Worker |
 
 ## 8. Thêm một loại job mới
 1. Viết hàm `handler(run, log)` trả về số dòng (hoặc `(số dòng, [lỗi])`); ném `AgentError(msg, "MA_LOI")` để có mã lỗi

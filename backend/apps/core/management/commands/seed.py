@@ -30,7 +30,7 @@ class Command(BaseCommand):
 
         for code, name, cron, desc in [
             ("WORKORDER_PLAN", "Lấy kế hoạch Work Order", "0 8 * * *",
-             "MES → View Work Order → lọc theo từng Oper → lưu file + DB"),
+             "MES → View Work Order → lọc theo từng Oper → lưu file chờ DYS import"),
             ("PRODUCTION_OUTPUT", "Lấy sản lượng theo giờ (TV)", "0 8 * * *",
              "MES → Inquiry → 타임별 실적 조회(TV) → ngày hiện tại → View → Excel → lưu file chờ DYS import"),
             ("CLEANUP", "Dọn file & dữ liệu cũ", "30 23 * * *",
@@ -40,6 +40,8 @@ class Command(BaseCommand):
                 code=code, defaults={"name": name, "cron": cron, "description": desc})
             if created:
                 job.save()   # tính next_run_at
+            elif (job.name, job.description) != (name, desc):
+                Job.objects.filter(pk=job.pk).update(name=name, description=desc)   # giữ nguyên lịch người dùng đã sửa
             self.stdout.write(f"Job {code}: {'tạo mới' if created else 'đã có'}")
 
         self.stdout.write(self.style.SUCCESS("Seed xong."))

@@ -5,6 +5,7 @@ Quản lý API key (bảng api_keys):
   python manage.py api_key list
   python manage.py api_key disable 3
   python manage.py api_key enable 3
+  python manage.py api_key logout 3                         # kết thúc phiên đang mở của khóa
 """
 import secrets
 
@@ -18,7 +19,7 @@ class Command(BaseCommand):
     help = "Thêm / liệt kê / khóa API key"
 
     def add_arguments(self, parser):
-        parser.add_argument("action", choices=["add", "list", "disable", "enable"])
+        parser.add_argument("action", choices=["add", "list", "disable", "enable", "logout"])
         parser.add_argument("target", nargs="?", help="Tên người dùng (add) hoặc id (disable/enable)")
         parser.add_argument("--key", help="Tự đặt khóa (bỏ trống = tạo ngẫu nhiên)")
         parser.add_argument("--note", default="")
@@ -27,7 +28,9 @@ class Command(BaseCommand):
         if action == "list":
             for k in ApiKey.objects.all():
                 self.stdout.write(f"#{k.id:<4} {'BẬT' if k.is_active else 'KHÓA':<5} {k.name:<30} "
-                                  f"dùng {k.use_count} lần, cuối: {k.last_used_at or '-'}")
+                                  f"dùng {k.use_count} lần, cuối: {k.last_used_at or '-'}"
+                                  + (f" | phiên: {k.session_user} tới {k.session_expires_at:%H:%M %d/%m}"
+                                     if k.session_id and k.session_expires_at else ""))
             return
         if not target:
             raise CommandError("Thiếu tên người dùng hoặc id")
@@ -41,6 +44,10 @@ class Command(BaseCommand):
         k = ApiKey.objects.filter(id=target).first()
         if not k:
             raise CommandError(f"Không có API key id={target}")
+        if action == "logout":
+            ApiKey.objects.filter(pk=k.pk).update(session_id="", session_user="", session_expires_at=None)
+            self.stdout.write(f"#{k.id} {k.name}: đã kết thúc phiên")
+            return
         k.is_active = action == "enable"
         k.save(update_fields=["is_active"])
         self.stdout.write(f"#{k.id} {k.name}: {'BẬT' if k.is_active else 'KHÓA'}")
