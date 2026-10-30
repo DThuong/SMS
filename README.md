@@ -4,14 +4,14 @@ Tự động lấy dữ liệu từ MESClient (Miracom MESplus) **không dùng c
 Giao diện quản trị nằm bên **DYS** (https://dys.dongyang.site). SMS chỉ cung cấp **API**, không có tài khoản người dùng.
 
 ```
-Trình duyệt DYS ──X-Api-Password──► https://sms-backend.dongyang.site
+Trình duyệt DYS ──X-Api-Key───────► https://sms-backend.dongyang.site
                                     ┌──────────── Máy Windows có MESClient ────────────┐
                                     │ Docker: api (Django + gunicorn, cổng 8000)        │
                                     │   │ MySQL (Workbench)      ▲ storage/ (dùng chung) │
                                     │ Windows: worker ── điều khiển MESClient + WPS     │
                                     └───────────────────────────────────────────────────┘
 DYS tải file sản lượng từ SMS → tự gọi POST /api/ProductionResult/import của DYS bằng token người dùng
-    → báo kết quả lại SMS (import-result) → SMS xóa file.
+    → báo kết quả lại SMS (POST /api/files/{id}/import-result) → SMS xóa file.
 ```
 - **api** (Docker): nhận lệnh, trả trạng thái, lịch sử, file.
 - **worker / agent** (chạy thẳng trên Windows — KHÔNG chạy được trong Docker vì cần desktop để điều khiển MESClient):
@@ -20,12 +20,11 @@ DYS tải file sản lượng từ SMS → tự gọi POST /api/ProductionResult
 
 ```
 backend/
-├─ apps/core          Xưởng (Oper), cài đặt, mật khẩu API, dashboard, /api/health
-├─ apps/jobs          Job + lịch cron, lần chạy, timeline từng bước, mã lỗi, worker
-├─ apps/plans         Báo cáo sản lượng, Work Order, file kế hoạch
+├─ apps/core          Bảng api_keys, settings, opers — /api/health, /api/dashboard, /api/opers, /api/settings
+├─ apps/jobs          Bảng jobs, job_runs, job_logs, worker_status — /api/jobs, /api/runs, worker
+├─ apps/plans         Bảng files, work_orders — /api/files, /api/workorders
 ├─ apps/collector     Agent điều khiển MESClient (pywinauto + COM) — chỉ chạy trên Windows
-├─ apps/integrations  API rút gọn cho DYS
-├─ sql/               Tạo / làm mới DB, quyền Docker, mật khẩu
+├─ sql/               Tạo / làm mới DB, quyền Docker, API key
 └─ Dockerfile, docker-compose.yml, .dockerignore
 docs/tien-do/         Nhật ký tiến độ theo ngày
 ```
@@ -75,40 +74,41 @@ python manage.py run_worker     &REM chạy nền
 Tự chạy khi đăng nhập Windows: Task Scheduler → *At log on* → `backend\scripts\run_worker.bat` → *Run only when user is logged on*.
 
 Lệnh khác: `run_job PRODUCTION_OUTPUT`, `probe_form "<tiêu đề form>" --export`,
-`api_password add "Tên"` / `api_password list` / `api_password disable <id>`.
+`api_key add "Tên"` / `api_key list` / `api_key disable <id>` / `api_key enable <id>`.
 
-## 5. Mật khẩu API
-Mọi API (trừ `/api/health`) cần mật khẩu trong bảng `core_apipassword`, gửi bằng **một** trong hai cách:
-- Header `X-Api-Password: <mật khẩu>` (khuyên dùng)
-- Query `?password=<mật khẩu>` (log của SMS không ghi phần query; nhưng URL vẫn có thể lưu ở lịch sử trình duyệt/proxy)
+## 5. API key
+Mọi API (trừ `/api/health`) cần khóa trong bảng `api_keys`, gửi bằng **một** trong hai cách:
+- Header `X-Api-Key: <khóa>` (khuyên dùng)
+- Query `?api_key=<khóa>` (khi không đặt được header, vd link tải file; log của SMS không ghi phần query)
 
-Header tùy chọn `X-Requested-By: <username DYS>` để ghi ai thao tác (không gửi thì lấy tên gắn với mật khẩu).
+Header tùy chọn `X-Requested-By: <username DYS>` để ghi ai thao tác (không gửi thì lấy tên gắn với khóa).
 
-Thêm mật khẩu trong Workbench:
+Tạo khóa: `python manage.py api_key add "Tên"` (in khóa ngẫu nhiên 1 lần), hoặc trong Workbench:
 ```sql
-INSERT INTO core_apipassword (name, password_hash, is_active, note, use_count, created_at)
-VALUES ('Tên người được cấp', SHA2('mat-khau-bi-mat', 256), 1, '', 0, NOW());
+INSERT INTO api_keys (name, key_hash, is_active, note, use_count, created_at)
+VALUES ('Tên người được cấp', SHA2('khoa-bi-mat', 256), 1, '', 0, NOW());
 ```
 
-## 6. API chính
+## 6. API
 | Nhóm | API |
 |---|---|
-| Sức khỏe | `GET /api/health` |
-| Tổng quan | `GET /api/dashboard` (worker sống không, job, sản lượng hôm nay, lần chạy gần đây) |
-| Job | `GET /api/jobs`, `PUT /api/jobs/{id}`, `POST /api/jobs/{id}/run` (`report_date`, `opers`) |
-| Lần chạy | `GET /api/runs`, `GET /api/runs/{id}` (có `error_info`: mã lỗi + cách xử lý), `GET /api/runs/{id}/steps?after_seq=` |
-| Sản lượng | `GET /api/production-reports`, `GET /api/production-reports/{id}`, `GET .../{id}/download`, `POST .../{id}/import-result` |
-| Kế hoạch WO | `GET /api/workorders?oper=2010`, `GET /api/workorders/exports`, `GET /api/files`, `GET /api/files/{id}/download` |
-| Cài đặt | `GET/POST/PUT/DELETE /api/opers`, `GET /api/settings`, `PUT /api/settings/{key}` (mật khẩu MES trả về `******`) |
-| Rút gọn | `POST /api/integrations/production-output/run`, `POST /api/integrations/jobs/{code}/run`, `GET /api/integrations/runs/{id}` |
+| Sức khỏe | `GET /api/health` (không cần khóa) |
+| Tổng quan | `GET /api/dashboard` — worker sống không, job, kế hoạch hôm nay theo xưởng, file sản lượng hôm nay, lần chạy gần đây |
+| Job | `GET /api/jobs`, `PUT /api/jobs/{code}` (`cron`, `is_active`, `params`), `POST /api/jobs/{code}/run` (`report_date`, `opers`, `wait_seconds`) |
+| Lần chạy | `GET /api/runs?job=&status=&date_from=&date_to=`, `GET /api/runs/{id}` (trạng thái + `error_info` + `logs` + `files`), `GET /api/runs/{id}/logs?after_seq=`, `GET /api/runs/{id}/logs/{seq}/screenshot` |
+| File | `GET /api/files?kind=workorder\|production&oper=&report_date=&status=`, `GET /api/files/{id}`, `GET /api/files/{id}/download`, `POST /api/files/{id}/import-result`, `DELETE /api/files/{id}?with_data=` |
+| Work Order | `GET /api/workorders?oper=2010&file_id=&line=&status=&q=` (bỏ `file_id` = file mới nhất) |
+| Cài đặt | `GET/POST /api/opers`, `PUT/DELETE /api/opers/{code}`, `GET /api/settings`, `PUT /api/settings/{key}` (mật khẩu MES trả về `******`) |
+
+Mã job: `PRODUCTION_OUTPUT` (sản lượng), `WORKORDER_PLAN` (kế hoạch WO), `CLEANUP` (dọn file cũ).
 
 ### Luồng sản lượng cho trang DYS
-1. `POST /api/integrations/production-output/run` `{ "report_date": "2026-10-28", "wait_seconds": 90 }`
-   (bỏ `report_date` = hôm nay giờ VN; ngày tương lai → 400; đang chạy dở → 409 kèm `run_id`)
-2. Chưa xong thì gọi `GET /api/integrations/runs/{run_id}` mỗi vài giây tới khi `finished = true`.
-3. Thành công → `production_report.download_url` → tải file (.xlsx).
+1. `POST /api/jobs/PRODUCTION_OUTPUT/run` `{ "report_date": "2026-10-28", "wait_seconds": 90 }`
+   (bỏ `report_date` = hôm nay giờ VN; ngày tương lai → 400; đang chạy dở → 409 kèm run id)
+2. `finished = false` → gọi `GET /api/runs/{id}` mỗi vài giây tới khi `finished = true`.
+3. `status = success` → `files[0].download_url` → tải file (.xlsx).
 4. DYS gọi `POST /api/ProductionResult/import?reportDate=...` (của DYS) với file + token người dùng.
-5. Báo lại: `POST /api/production-reports/{id}/import-result` `{ "success": true, "message": "..." }`
+5. Báo lại: `POST /api/files/{files[0].id}/import-result` `{ "success": true, "message": "..." }`
    → SMS ghi nhận, xóa file nếu bật `delete_file_after_import`.
 
 ### Mã lỗi (`error_info.code`)
@@ -117,16 +117,26 @@ VALUES ('Tên người được cấp', SHA2('mat-khau-bi-mat', 256), 1, '', 0, 
 `SHEET_APP_MISSING`, `SHEET_COM_ATTACH_FAILED`, `SHEET_EXPORT_TIMEOUT`, `SHEET_DATA_UNSTABLE`, `SHEET_READ_FAILED`,
 `AGENT_NOT_WINDOWS`, `INVALID_PARAMS`, `UNKNOWN` — tiêu đề + cách xử lý trong `apps/collector/errors.py`.
 
-## 7. Database (MySQL `sms`)
-| Bảng | Nội dung |
-|---|---|
-| `core_apipassword` | Mật khẩu API (SHA-256), ai được cấp, số lần dùng |
-| `core_setting` | Cài đặt: tài khoản MES (mật khẩu đánh dấu bí mật), đường dẫn MESClient.exe, thời gian chờ, số ngày giữ file |
-| `core_oper` | Xưởng cần lấy kế hoạch WO |
-| `jobs_job`, `jobs_jobrun`, `jobs_jobrunstep` | Job + lịch; lần chạy (ai yêu cầu, mã lỗi); timeline |
-| `jobs_workerheartbeat` | Worker còn sống không |
-| `plans_productionreport` | File sản lượng theo ngày + kết quả DYS import |
-| `plans_exportfile`, `plans_workorder` | File kế hoạch WO và từng dòng WO |
+## 7. Database (MySQL `sms`) — 9 bảng
+```
+jobs ──1:n──► job_runs ──1:n──► job_logs
+                 │
+                 └──1:n──► files ──1:n──► work_orders
+                              ▲ (file workorder thuộc 1 xưởng)
+opers ────────────────────────┘
+api_keys, settings, worker_status: bảng độc lập
+```
+| Bảng | Nội dung | Ai ghi |
+|---|---|---|
+| `api_keys` | API key (SHA-256), cấp cho ai, số lần dùng | Admin; API tăng `use_count` mỗi request |
+| `settings` | Tài khoản MES (mật khẩu bí mật), đường dẫn MESClient.exe, thời gian chờ, số ngày giữ file | `seed`, `PUT /api/settings/{key}` |
+| `opers` | Xưởng cần lấy kế hoạch WO | `seed`, `/api/opers` |
+| `jobs` | **Định nghĩa** job + lịch cron (3 dòng cố định) | `seed`, `PUT /api/jobs/{code}` |
+| `job_runs` | **Mỗi lần chạy**: ai yêu cầu, tham số, trạng thái, số dòng, mã lỗi | API tạo (`queued`), worker cập nhật |
+| `job_logs` | **Nhật ký từng bước** của một lần chạy (+ ảnh lỗi) | Worker (mỗi dòng log) |
+| `worker_status` | 1 dòng: worker còn sống không, đang chạy lần nào | Worker mỗi 5 giây |
+| `files` | Mọi file lấy từ MES: `kind=workorder` (theo xưởng) hoặc `kind=production` (theo ngày, kèm kết quả DYS import) | Worker tạo; `import-result` cập nhật |
+| `work_orders` | Từng dòng Work Order trong một file `kind=workorder` | Worker |
 
 ## 8. Thêm một loại job mới
 1. Viết hàm `handler(run, log)` trả về số dòng (hoặc `(số dòng, [lỗi])`); ném `AgentError(msg, "MA_LOI")` để có mã lỗi
