@@ -1,13 +1,14 @@
 from django.db import models
 
-from apps.core.models import Oper
+from apps.core.models import Oper, Plant
 from apps.jobs.models import JobRun
 
 
 class File(models.Model):
     """
     Bảng `files` — mọi file một lần chạy job lấy từ MES:
-      kind = workorder  : file kế hoạch Work Order của 1 xưởng (oper) → DYS tải về import rồi báo lại
+      kind = workorder  : file kế hoạch Work Order của 1 plant + 1 xưởng (oper) trong 1 kỳ (period_from..period_to)
+                          → DYS tải về import rồi báo lại
       kind = production : file sản lượng theo giờ (TV) của 1 ngày (report_date) → DYS tải về import rồi báo lại
     """
     class Kind(models.TextChoices):
@@ -22,9 +23,13 @@ class File(models.Model):
     kind = models.CharField("Loại file", max_length=20, choices=Kind.choices)
     run = models.ForeignKey(JobRun, null=True, blank=True, on_delete=models.SET_NULL,
                             related_name="files", verbose_name="Lần chạy")
+    plant = models.ForeignKey(Plant, null=True, blank=True, on_delete=models.PROTECT,
+                              related_name="files", verbose_name="Nhà máy (file workorder)")
     oper = models.ForeignKey(Oper, null=True, blank=True, on_delete=models.PROTECT,
                              related_name="files", verbose_name="Xưởng (file workorder)")
     report_date = models.DateField("Ngày sản lượng (file production)", null=True, blank=True)
+    period_from = models.DateField("Period từ ngày (file workorder)", null=True, blank=True)
+    period_to = models.DateField("Period đến ngày (file workorder)", null=True, blank=True)
     export_date = models.DateTimeField("Thời điểm xuất từ MES")
     file_path = models.CharField("Đường dẫn", max_length=500, help_text="Tương đối so với STORAGE_DIR")
     file_name = models.CharField("Tên file", max_length=200)

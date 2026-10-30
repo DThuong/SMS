@@ -42,7 +42,17 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_FORM_NOT_FOUND": ("Không mở được màn hình MES", "Thử mở màn hình bằng tay trên MES để kiểm tra."),
     "MES_CONTROL_NOT_FOUND": ("Không tìm thấy nút/ô trên màn hình MES",
                               "Giao diện MES có thể đã thay đổi. Chạy probe_form để kiểm tra lại."),
-    "MES_DATE_SET_FAILED": ("Không đặt được ngày trên MES", "Chạy mes_diag date để kiểm tra ô FROM_DATE."),
+    "MES_DATE_SET_FAILED": ("Không đặt được ngày trên MES",
+                            "Sản lượng: chạy `mes_diag date` (ô FROM_DATE). Kế hoạch WO: chạy `mes_diag workorder` "
+                            "(ô Period từ ngày ~ đến ngày)."),
+    "MES_BUSY_TIMEOUT": ("MESClient không phản hồi sau khi bấm View",
+                         "Khoảng ngày quá lớn hoặc MES/mạng chậm. Thu hẹp Period hoặc kiểm tra MES trên máy agent."),
+    "MES_DATA_MISMATCH": ("Dữ liệu MES xuất ra không khớp điều kiện đã chọn",
+                          "Bảng xuất ra toàn dữ liệu xưởng khác (MES chưa tải xong khi bấm Excel). "
+                          "Tăng 'mes_view_wait_seconds' rồi chạy lại."),
+    "MES_CODE_SELECT_FAILED": ("Không chọn được Plant / Oper trên MES",
+                               "Mã Plant/Oper không có trong danh sách của MES hoặc danh sách đổi giao diện. "
+                               "Chạy `mes_diag workorder` để thử từng bước; nội dung lỗi có các dòng đọc được."),
     "MES_SAVE_DIALOG_NOT_FOUND": ("MES không mở hộp thoại lưu file",
                                   "Bấm nút Excel bằng tay trên màn hình đó xem có hiện hộp thoại Save As không."),
     "MES_SAVE_DIALOG_FAILED": ("Không lưu được file từ MES",

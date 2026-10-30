@@ -1,4 +1,4 @@
-"""API: sức khỏe, phiên đăng nhập bằng API key, xưởng (opers), cài đặt (settings), hạn lưu dữ liệu, dashboard"""
+"""API: sức khỏe, phiên đăng nhập bằng API key, nhà máy (plants), xưởng (opers), cài đặt (settings), hạn lưu dữ liệu, dashboard"""
 from datetime import timedelta
 
 from django.db.models import Count
@@ -7,7 +7,7 @@ from django.utils import timezone
 from ninja import Router, Schema
 from ninja.errors import HttpError
 
-from .models import ApiKey, Oper, Setting, get_setting
+from .models import ApiKey, Oper, Plant, Setting, get_setting
 from .security import create_session, end_session, request_token, session_minutes, verify_key
 from .timeutil import day_end, day_start
 
@@ -69,6 +69,63 @@ def current_session(request):
 def logout_session(request):
     """Kết thúc phiên đang dùng → API key trống phiên, người khác đăng nhập ngay được"""
     return {"ok": end_session(request.auth, request_token(request))}
+
+
+# ---------------- Plant ----------------
+class PlantIn(Schema):
+    code: str                  # mã plant trên MES, vd PL20
+    name: str                  # vd TV BOARD PLANT
+    description: str = ""
+    is_active: bool = True
+    is_default: bool = False   # plant dùng khi chạy WORKORDER_PLAN không truyền plant (chỉ 1 plant mặc định)
+    sort_order: int = 0
+
+
+class PlantOut(PlantIn):
+    id: int
+
+
+def _plant_data(data: PlantIn) -> dict:
+    d = data.dict()
+    d["code"] = d["code"].strip().upper()
+    if not d["code"]:
+        raise HttpError(400, "Thiếu mã plant")
+    return d
+
+
+@router.get("/plants", response=list[PlantOut], tags=["Plant"], summary="Danh sách nhà máy (Plant)")
+def list_plants(request):
+    """Plant chọn ở màn hình View Work Order của MES (PL10 SMPS PLANT, PL20 TV BOARD PLANT...)"""
+    return Plant.objects.all()
+
+
+@router.post("/plants", response=PlantOut, tags=["Plant"], summary="Thêm plant")
+def create_plant(request, data: PlantIn):
+    d = _plant_data(data)
+    if Plant.objects.filter(code=d["code"]).exists():
+        raise HttpError(400, f"Mã plant {d['code']} đã tồn tại")
+    return Plant.objects.create(**d)
+
+
+@router.put("/plants/{code}", response=PlantOut, tags=["Plant"], summary="Sửa plant")
+def update_plant(request, code: str, data: PlantIn):
+    plant = get_object_or_404(Plant, code=code)
+    d = _plant_data(data)
+    if d["code"] != plant.code and Plant.objects.filter(code=d["code"]).exists():
+        raise HttpError(400, f"Mã plant {d['code']} đã tồn tại")
+    for k, v in d.items():
+        setattr(plant, k, v)
+    plant.save()
+    return plant
+
+
+@router.delete("/plants/{code}", tags=["Plant"], summary="Xóa plant (chưa có file)")
+def delete_plant(request, code: str):
+    plant = get_object_or_404(Plant, code=code)
+    if plant.files.exists():
+        raise HttpError(400, "Plant đã có file — hãy tắt 'Đang dùng' thay vì xóa")
+    plant.delete()
+    return {"ok": True}
 
 
 # ---------------- Oper ----------------
@@ -213,7 +270,9 @@ def dashboard(request):
     from apps.jobs.models import Job, JobRun, WorkerStatus
     from apps.plans.api import file_out
     from apps.plans.models import File
+    from apps.plans.services import purge_missing_files
 
+    purge_missing_files()                   # file đã mất khỏi storage → bỏ dòng trước khi đếm
     now = timezone.localtime()
     today = now.date()
     workorders = File.objects.filter(kind=File.Kind.WORKORDER)
@@ -242,7 +301,8 @@ def dashboard(request):
 
     ws = WorkerStatus.objects.filter(pk=1).first()
     production_today = (File.objects.select_related("oper")
-                        .filter(kind=File.Kind.PRODUCTION, report_date=today).order_by("-id").first())
+                        .filter(kind=File.Kind.PRODUCTION, report_date__gte=today - timedelta(days=1))
+                        .order_by("-report_date", "-id").first())   # job định kỳ lấy ngày hôm qua
     return {
         "now": now,
         "worker": {"online": WorkerStatus.is_online(), "last_seen": ws.last_seen if ws else None,

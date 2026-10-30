@@ -1,6 +1,39 @@
 from django.db import models
 
 
+class Plant(models.Model):
+    """Bảng `plants` — nhà máy (Plant) chọn ở ô Plant trên màn hình View Work Order của MES (vd PL20 TV BOARD PLANT)"""
+    code = models.CharField("Mã Plant", max_length=20, unique=True)
+    name = models.CharField("Tên nhà máy", max_length=100)
+    description = models.CharField("Mô tả", max_length=255, blank=True)
+    is_active = models.BooleanField("Đang dùng", default=True)
+    is_default = models.BooleanField("Mặc định", default=False,
+                                     help_text="Plant dùng khi chạy job mà không truyền plant (chỉ 1 plant mặc định)")
+    sort_order = models.PositiveIntegerField("Thứ tự", default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "plants"
+        ordering = ["sort_order", "code"]
+        verbose_name = "Nhà máy (Plant)"
+        verbose_name_plural = "Nhà máy (Plant)"
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.is_default:     # chỉ giữ 1 plant mặc định
+            Plant.objects.exclude(pk=self.pk).filter(is_default=True).update(is_default=False)
+
+    @classmethod
+    def default(cls):
+        """Plant mặc định đang dùng (không có thì plant đang dùng đầu tiên)"""
+        qs = cls.objects.filter(is_active=True)
+        return qs.filter(is_default=True).first() or qs.first()
+
+
 class Oper(models.Model):
     """Bảng `opers` — công đoạn/xưởng trên MES cần lấy kế hoạch (vd: 2010 SMD, 3010 MAIN Input)"""
     code = models.CharField("Mã Oper", max_length=20, unique=True)
@@ -67,6 +100,10 @@ DEFAULT_SETTINGS = [
      "Thời gian tối đa chờ WPS nhận dữ liệu sau khi bấm nút Excel", False),
     ("mes_auto_dismiss_upgrade", "true", "bool", "Tự đóng hộp thoại nâng cấp",
      "Tự bấm No mỗi khi MES hỏi nâng cấp phiên bản", False),
+    ("workorder_period_days_before", "0", "int", "Kế hoạch WO: lùi bao nhiêu ngày",
+     "Job WORKORDER_PLAN tự động (hoặc chạy không truyền ngày): Period từ = hôm nay trừ số ngày này", False),
+    ("workorder_period_days_after", "7", "int", "Kế hoạch WO: tới bao nhiêu ngày sau",
+     "Job WORKORDER_PLAN tự động (hoặc chạy không truyền ngày): Period đến = hôm nay cộng số ngày này", False),
     ("delete_file_after_import", "true", "bool", "Xóa file sau khi DYS import",
      "DYS báo import thành công thì xóa file sản lượng trên máy", False),
     ("data_retention_days", "3", "int", "Giữ dữ liệu (ngày)",

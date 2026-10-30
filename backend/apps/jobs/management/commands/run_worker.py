@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import traceback
+from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, connection
@@ -68,6 +69,9 @@ class Command(BaseCommand):
         n = _fail_stale_runs("Worker khởi động lại khi job đang chạy")
         if n:
             self.stdout.write(self.style.WARNING(f"Đánh dấu {n} lần chạy dang dở là lỗi"))
+
+        from apps.plans.services import ensure_storage_marker
+        ensure_storage_marker()     # API chỉ dọn bảng files khi thấy đúng thư mục storage của worker
 
         WorkerStatus.objects.update_or_create(pk=1, defaults={
             "hostname": socket.gethostname(), "pid": os.getpid(),
@@ -132,8 +136,9 @@ class Command(BaseCommand):
             params = dict(job.params or {})
             params["scheduled_for"] = start.isoformat()
             if job.code == "PRODUCTION_OUTPUT":
-                # Chạy bù sau nửa đêm vẫn lấy đúng ngày của kỳ (vd kỳ 30/10 08:00, chạy lúc 02:00 ngày 31 → lấy 30/10)
-                params.setdefault("report_date", start.date().isoformat())
+                # Lấy sản lượng NGÀY HÔM TRƯỚC của kỳ: kỳ 30/10 08:00 → FROM_DATE = 29/10 (ngày 29 đã chốt đủ trên MES).
+                # Tính theo ngày bắt đầu kỳ nên chạy bù sau nửa đêm vẫn đúng (kỳ 30/10, chạy lúc 02:00 ngày 31 → vẫn 29/10)
+                params.setdefault("report_date", (timezone.localtime(start).date() - timedelta(days=1)).isoformat())
             JobRun.objects.create(job=job, trigger=JobRun.Trigger.SCHEDULE, params=params)
             late = (timezone.localtime(now) - start).total_seconds() / 60
             self.stdout.write(f"Đến giờ chạy: {job.code} (kỳ {start:%d/%m %H:%M} → {end:%d/%m %H:%M}"

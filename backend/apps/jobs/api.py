@@ -19,7 +19,12 @@ Luồng sản lượng cho DYS:
   4. Mỗi file: POST /api/files/{file_id}/import-result {"success": true, "message": "..."}
 
 Luồng kế hoạch Work Order cho DYS (mỗi xưởng một file):
-  1. POST /api/jobs/WORKORDER_PLAN/run {"opers": ["2010", "3010"], "wait_seconds": 90}   (bỏ opers = mọi xưởng)
+  1. POST /api/jobs/WORKORDER_PLAN/run
+       {"plant": "PL20", "date_from": "2026-10-26", "date_to": "2026-11-01", "opers": ["2010", "3010"],
+        "wait_seconds": 90}
+     plant bỏ trống = plant mặc định (GET /api/plants) · date_from/date_to = Period trên MES (được chọn ngày tương lai,
+     tối đa 62 ngày; bỏ trống = hôm nay - workorder_period_days_before → hôm nay + workorder_period_days_after)
+     · opers bỏ trống = mọi xưởng đang dùng
   2. finished=false → gọi GET /api/runs/{id} tới khi finished=true
      status: success = đủ xưởng · partial = có xưởng lỗi (xem error) · failed = không lấy được xưởng nào
   3. files[] — mỗi xưởng 1 file (oper, rows, id) → tải download_url → DYS import vào DB của DYS
@@ -98,9 +103,11 @@ MAX_RANGE_DAYS = 31                     # PRODUCTION_OUTPUT: tối đa 31 ngày 
 
 class RunIn(Schema):
     report_date: date | None = None     # PRODUCTION_OUTPUT: lấy 1 ngày. Bỏ trống (và không có date_from) = hôm nay
-    date_from: date | None = None       # PRODUCTION_OUTPUT: lấy nhiều ngày — từ ngày (MES mỗi lần chỉ 1 ngày → agent lặp)
-    date_to: date | None = None         #   đến ngày (bỏ trống = bằng date_from). Mỗi ngày ra 1 file
-    opers: list[str] | None = None      # WORKORDER_PLAN: chỉ lấy các xưởng này. Bỏ trống = mọi xưởng đang dùng
+    date_from: date | None = None       # PRODUCTION_OUTPUT: từ ngày (MES mỗi lần chỉ 1 ngày → agent lặp, mỗi ngày 1 file)
+                                        # WORKORDER_PLAN: Period từ ngày trên màn hình View Work Order
+    date_to: date | None = None         #   đến ngày (bỏ trống = bằng date_from)
+    plant: str | None = None            # WORKORDER_PLAN: mã plant (PL20, PL10). Bỏ trống = plant mặc định
+    opers: list[str] | None = None      # WORKORDER_PLAN: các xưởng cần lấy (vd ["2010","3010"]). Bỏ trống = mọi xưởng đang dùng
     wait_seconds: int = 0               # >0: giữ kết nối chờ job xong (tối đa 90s vì Cloudflare cắt request sau 100s)
 
 
@@ -126,7 +133,52 @@ def _report_dates(data: RunIn) -> list[date]:
     return [start + timedelta(days=i) for i in range(n)]
 
 
-@router.post("/jobs/{code}/run", summary="Chạy job ngay (sản lượng theo ngày / khoảng ngày, kế hoạch theo xưởng)")
+def _workorder_params(data: RunIn) -> dict:
+    """
+    WORKORDER_PLAN — chốt đủ 4 điều kiện ngay khi tạo lần chạy (lần chạy ghi rõ đã chọn gì):
+      plant     : mã plant đang dùng (bỏ trống = plant mặc định)
+      date_from : Period từ ngày ┐ bỏ trống cả 2 = hôm nay - workorder_period_days_before
+      date_to   : Period đến ngày┘                → hôm nay + workorder_period_days_after
+      opers     : các xưởng đang dùng (bỏ trống = mọi xưởng đang dùng)
+    """
+    from apps.core.models import Oper, Plant
+    from apps.plans.jobs import MAX_PERIOD_DAYS, default_period
+
+    if data.plant and data.plant.strip():
+        plant = Plant.objects.filter(code=data.plant.strip().upper(), is_active=True).first()
+        if plant is None:
+            raise HttpError(400, f"Mã plant không có hoặc đang tắt: {data.plant.strip().upper()}. Xem GET /api/plants")
+    else:
+        plant = Plant.default()
+        if plant is None:
+            raise HttpError(400, "Chưa có plant nào đang dùng (GET /api/plants)")
+
+    if data.date_from or data.date_to:
+        start = data.date_from or data.date_to
+        end = data.date_to or start
+    else:
+        start, end = default_period(timezone.localdate())
+    if start > end:
+        raise HttpError(400, f"Từ ngày ({start:%d/%m/%Y}) phải trước hoặc bằng đến ngày ({end:%d/%m/%Y})")
+    n = (end - start).days + 1
+    if n > MAX_PERIOD_DAYS:
+        raise HttpError(400, f"Period tối đa {MAX_PERIOD_DAYS} ngày mỗi lần chạy (đang chọn {n} ngày)")
+
+    active = list(Oper.objects.filter(is_active=True).order_by("sort_order", "code").values_list("code", flat=True))
+    codes = [c.strip() for c in (data.opers or []) if c and c.strip()]
+    if codes:
+        unknown = [c for c in codes if c not in active]
+        if unknown:
+            raise HttpError(400, f"Mã xưởng không có hoặc đang tắt: {', '.join(unknown)}. Xem GET /api/opers")
+        codes = list(dict.fromkeys(codes))                # bỏ trùng, giữ thứ tự
+    else:
+        codes = active
+    if not codes:
+        raise HttpError(400, "Chưa có xưởng (Oper) nào đang dùng (GET /api/opers)")
+    return {"plant": plant.code, "period_from": start.isoformat(), "period_to": end.isoformat(), "opers": codes}
+
+
+@router.post("/jobs/{code}/run", summary="Chạy job ngay (sản lượng theo ngày / khoảng ngày; kế hoạch theo plant, Period, xưởng)")
 def run_job(request, code: str, data: RunIn):
     """
     Đưa yêu cầu vào HÀNG CHỜ (không bao giờ trả 409 vì đang bận). Ai bấm trước chạy trước; đang có job chạy thì
@@ -134,19 +186,14 @@ def run_job(request, code: str, data: RunIn):
     Header X-Requested-By = người bấm bên DYS.
     """
     job = get_object_or_404(Job, code=code)
-    report_dates = _report_dates(data)
     params = dict(job.params or {})
-    if report_dates:
-        params.pop("report_date", None)
-        params["report_dates"] = [d.isoformat() for d in report_dates]
-    if data.opers:
-        from apps.core.models import Oper
-        codes = [c.strip() for c in data.opers if c and c.strip()]
-        known = set(Oper.objects.filter(code__in=codes, is_active=True).values_list("code", flat=True))
-        unknown = [c for c in codes if c not in known]
-        if unknown:
-            raise HttpError(400, f"Mã xưởng không có hoặc đang tắt: {', '.join(unknown)}. Xem GET /api/opers")
-        params["opers"] = codes
+    if code == "WORKORDER_PLAN":
+        params.update(_workorder_params(data))
+    else:
+        report_dates = _report_dates(data)
+        if report_dates:
+            params.pop("report_date", None)
+            params["report_dates"] = [d.isoformat() for d in report_dates]
     # HÀNG CHỜ: không từ chối khi đang có job chạy — mọi yêu cầu đều được xếp hàng.
     # id tự tăng = thứ tự bấm; worker luôn lấy lần chạy `queued` có id nhỏ nhất → ai bấm trước chạy trước,
     # người sau chờ tới lượt (kể cả khác job: 1 worker chỉ điều khiển 1 MESClient tại một thời điểm).
@@ -192,13 +239,16 @@ def _log_out(r: JobRun, lg) -> dict:
 
 def _run_detail(r: JobRun) -> dict:
     from apps.plans.api import file_out
+    from apps.plans.services import purge_missing_files
+
+    purge_missing_files(r.files.all())      # file đã mất khỏi storage → bỏ dòng
 
     r = JobRun.objects.select_related("job").get(pk=r.pk)
     return {
         **_run_out(r),
         "worker_online": WorkerStatus.is_online(),
         "logs": [_log_out(r, lg) for lg in r.logs.order_by("seq")],
-        "files": [file_out(f) for f in r.files.select_related("oper").order_by("id")],
+        "files": [file_out(f) for f in r.files.select_related("oper", "plant").order_by("id")],
     }
 
 

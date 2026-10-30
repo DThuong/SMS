@@ -109,7 +109,9 @@ class ProductionCollector(BaseCollector):
         self.set_from_date(report_date)
 
         self.mes.click(self.form, "btnView")
-        self.log.info("Chờ MES tải dữ liệu %ss...", self.cfg["view_wait"])
+        time.sleep(1)
+        busy = self.mes.wait_idle()                       # chờ MES truy vấn xong (luồng giao diện trả lời lại)
+        self.log.info("MES tải dữ liệu %.0fs; chờ thêm %ss...", busy, self.cfg["view_wait"])
         self.mes.wait(self.cfg["view_wait"])
 
         before = self.mes.dialogs()

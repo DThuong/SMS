@@ -9,7 +9,11 @@ Chẩn đoán agent trên máy MES (chạy trên Windows):
       Mở form "Product Time Confirm (TV)" (tự mở nếu chưa), đặt ngày vào ô FROM_DATE giống hệt job thật,
       chụp ảnh trước/sau (hoặc ảnh lúc lỗi).
 
-Kết quả: backend/storage/probe/diag_*.json và diag_date_*.png
+  python manage.py mes_diag workorder 2026-10-26 2026-11-01 --plant PL20 --oper 2010
+      Mở form "View Work Order", chọn Plant → Period (từ ngày ~ đến ngày) → Oper giống hệt job thật nhưng
+      KHÔNG bấm View/Excel; chụp ảnh sau từng bước (hoặc ảnh lúc lỗi). Dùng để kiểm tra trước khi chạy job.
+
+Kết quả: backend/storage/probe/diag_*.json, diag_date_*.png, diag_wo_*.png
 """
 import ctypes
 import json
@@ -28,18 +32,26 @@ OBJID_NATIVEOM = -16
 
 
 class Command(BaseCommand):
-    help = "Chẩn đoán WPS (COM) và cách đặt ngày FROM_DATE"
+    help = "Chẩn đoán WPS (COM), đặt ngày FROM_DATE (sản lượng), điều kiện View Work Order"
 
     def add_arguments(self, parser):
-        parser.add_argument("what", choices=["sheet", "date"])
-        parser.add_argument("value", nargs="?", help="Ngày YYYY-MM-DD (cho 'date')")
+        parser.add_argument("what", choices=["sheet", "date", "workorder"])
+        parser.add_argument("value", nargs="?", help="Ngày YYYY-MM-DD (date: FROM_DATE; workorder: từ ngày)")
+        parser.add_argument("value2", nargs="?", help="workorder: đến ngày YYYY-MM-DD (bỏ trống = bằng từ ngày)")
         parser.add_argument("--form", default="Product Time Confirm (TV)")
+        parser.add_argument("--plant", default="PL20", help="workorder: mã Plant")
+        parser.add_argument("--oper", default="2010", help="workorder: mã Oper")
 
-    def handle(self, *args, what, value, form, **opts):
+    def handle(self, *args, what, value, value2=None, form, plant="PL20", oper="2010", **opts):
         out = settings.STORAGE_DIR / "probe"
         out.mkdir(parents=True, exist_ok=True)
         if what == "sheet":
             self._sheet(out)
+        elif what == "workorder":
+            if not value:
+                raise CommandError("Thiếu ngày, vd: mes_diag workorder 2026-10-26 2026-11-01 --plant PL20 --oper 2010")
+            d1 = date.fromisoformat(value)
+            self._workorder(out, d1, date.fromisoformat(value2) if value2 else d1, plant, oper)
         else:
             if not value:
                 raise CommandError("Thiếu ngày, vd: mes_diag date 2026-10-27")
@@ -164,3 +176,46 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"LỖI [{e.code}]: {e}"))
             sys.exit(1)
         self.stdout.write(self.style.SUCCESS(f"Đã đặt FROM_DATE = {d:%m/%d/%Y}. Ảnh trước/sau trong {out}"))
+
+    # ------------------------------------------------------------------ View Work Order
+    def _workorder(self, out, d1: date, d2: date, plant: str, oper: str):
+        import sys
+
+        from apps.collector import winutil
+        from apps.collector.errors import AgentError
+        from apps.plans.jobs import _load_collector, mes_config
+
+        log = self._stdout_log()
+        c = _load_collector("workorder")(log, mes_config())
+        steps = [("1_plant", lambda: c.set_plant(plant)),
+                 ("2_period", lambda: c.set_period(d1, d2)),
+                 ("3_oper", lambda: c.set_oper(oper))]
+        try:
+            c.open()
+            winutil.capture_window(c.mes.hwnd, out / "diag_wo_0_truoc.png")
+            for tag, fn in steps:
+                fn()
+                winutil.capture_window(c.mes.hwnd, out / f"diag_wo_{tag}.png")
+        except (AgentError, ValueError) as e:
+            try:
+                winutil.capture_window(c.mes.hwnd, out / "diag_wo_loi.png")
+            except Exception:
+                pass
+            self.stdout.write(self.style.ERROR(f"LỖI [{getattr(e, 'code', 'INVALID_PARAMS')}]: {e}"))
+            sys.exit(1)
+        self.stdout.write(self.style.SUCCESS(
+            f"Đã chọn Plant {plant} · Period {d1:%d/%m/%Y} ~ {d2:%d/%m/%Y} · Oper {oper} (chưa bấm View). "
+            f"Ảnh từng bước trong {out}"))
+
+    def _stdout_log(self):
+        import logging
+        import sys
+
+        log = logging.getLogger("sms.mes_diag")
+        log.setLevel(logging.INFO)
+        if not log.handlers:
+            hd = logging.StreamHandler(sys.stdout)
+            hd.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
+            log.addHandler(hd)
+            log.propagate = False
+        return log

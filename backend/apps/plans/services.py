@@ -7,18 +7,21 @@ import pandas as pd
 from django.conf import settings
 from django.utils import timezone
 
-from apps.core.models import Oper
+from apps.core.models import Oper, Plant
 
 from .models import File
 
-def _write_excel(df: pd.DataFrame, oper: Oper, export_dt: datetime):
-    folder = settings.PLAN_DIR / oper.folder
+def _write_excel(df: pd.DataFrame, plant: Plant, oper: Oper, export_dt: datetime, d1, d2):
+    """storage/KeHoach/<PLANT>/<XƯỞNG>/<từ ngày>-<đến ngày>_<YYYY-MM-DD_HHMMSS>.xlsx (sheet WorkOrder + Info)"""
+    ensure_storage_marker()
+    folder = settings.PLAN_DIR / plant.code / oper.folder
     folder.mkdir(parents=True, exist_ok=True)
-    base = export_dt.strftime("%Y-%m-%d_%H%M%S")      # Windows không cho dấu ':' trong tên file
+    base = f"{d1:%Y%m%d}-{d2:%Y%m%d}_{export_dt:%Y-%m-%d_%H%M%S}"   # Windows không cho dấu ':' trong tên file
     path, i = folder / f"{base}.xlsx", 1
     while path.exists():
         path, i = folder / f"{base}_{i}.xlsx", i + 1
-    info = pd.DataFrame([{"Export Date": export_dt, "Oper": oper.code, "Xưởng": oper.name,
+    info = pd.DataFrame([{"Export Date": export_dt, "Plant": plant.code, "Tên plant": plant.name,
+                          "Period từ": d1, "Period đến": d2, "Oper": oper.code, "Xưởng": oper.name,
                           "Số dòng": len(df), "Lưu lúc": datetime.now().replace(microsecond=0)}])
     with pd.ExcelWriter(path, engine="openpyxl") as w:
         df.to_excel(w, sheet_name="WorkOrder", index=False)
@@ -26,13 +29,13 @@ def _write_excel(df: pd.DataFrame, oper: Oper, export_dt: datetime):
     return path
 
 
-def save_export(run, oper: Oper, df: pd.DataFrame, export_dt: datetime) -> File:
-    """Lưu file kế hoạch 1 xưởng (chỉ file + 1 dòng `files`, không lưu từng dòng WO).
+def save_export(run, plant: Plant, oper: Oper, df: pd.DataFrame, export_dt: datetime, d1, d2) -> File:
+    """Lưu file kế hoạch của 1 plant + 1 xưởng trong kỳ d1..d2 (chỉ file + 1 dòng `files`, không lưu từng dòng WO).
     export_dt: giờ địa phương (naive) đọc từ dòng 'Export Date' của MES"""
-    path = _write_excel(df, oper, export_dt)
+    path = _write_excel(df, plant, oper, export_dt, d1, d2)
     content = path.read_bytes()
     return File.objects.create(
-        kind=File.Kind.WORKORDER, run=run, oper=oper,
+        kind=File.Kind.WORKORDER, run=run, plant=plant, oper=oper, period_from=d1, period_to=d2,
         export_date=timezone.make_aware(export_dt) if timezone.is_naive(export_dt) else export_dt,
         file_path=str(path.relative_to(settings.STORAGE_DIR)).replace("\\", "/"),
         file_name=path.name, rows=len(df), size=len(content),
@@ -43,6 +46,7 @@ def save_export(run, oper: Oper, df: pd.DataFrame, export_dt: datetime) -> File:
 # ======================= SẢN LƯỢNG =======================
 def production_target(report_date) -> Path:
     """Đường dẫn (chưa có đuôi) để MES lưu file sản lượng: storage/SanLuong/<YYYY-MM-DD>_<HHMMSS>"""
+    ensure_storage_marker()
     folder = settings.STORAGE_DIR / "SanLuong"
     folder.mkdir(parents=True, exist_ok=True)
     return folder / f"{report_date:%Y-%m-%d}_{datetime.now():%H%M%S}"
@@ -60,22 +64,58 @@ def register_production_file(run, report_date, path: Path, rows: int, export_dt:
     )
 
 
-def mark_import_result(report, success: bool, message: str = "", imported_by: str = "", delete_file: bool = True):
-    """DYS báo kết quả import file (sản lượng / kế hoạch). Thành công + delete_file → xóa file trên máy"""
+def mark_import_result(report, success: bool, message: str = "", imported_by: str = "", delete_file: bool = True) -> bool:
+    """
+    DYS báo kết quả import file (sản lượng / kế hoạch).
+    Thành công + delete_file → xóa file trên máy VÀ dòng trong bảng files. Trả về True nếu đã xóa.
+    """
     report.status = File.Status.IMPORTED if success else File.Status.IMPORT_FAILED
     report.imported_at = timezone.now() if success else None
     report.imported_by = imported_by[:150]
     report.dys_message = message[:5000]
     if success and delete_file:
-        delete_file_on_disk(report, save=False)
+        delete_file_and_row(report)
+        return True
     report.save()
-    return report
+    return False
 
 
-def delete_file_on_disk(f: File, save: bool = True):
-    """Xóa file trên ổ đĩa, giữ lại dòng trong bảng files (đánh dấu file_deleted)"""
-    if not f.file_deleted:
-        (settings.STORAGE_DIR / f.file_path).unlink(missing_ok=True)
-        f.file_deleted = True
-        if save:
-            f.save(update_fields=["file_deleted"])
+def delete_file_and_row(f: File):
+    """Xóa file trên ổ đĩa rồi xóa luôn dòng trong bảng files (file không còn thì dòng cũng không giữ lại)"""
+    (settings.STORAGE_DIR / f.file_path).unlink(missing_ok=True)
+    if f.pk:
+        File.objects.filter(pk=f.pk).delete()
+
+
+STORAGE_MARKER = ".sms_storage"
+
+
+def ensure_storage_marker():
+    """
+    Worker ghi file đánh dấu vào thư mục storage nó đang dùng. API (Docker) chỉ dọn bảng files khi thấy file này
+    → nếu volume Docker gắn sai thư mục (thấy thư mục trống) thì không xóa nhầm toàn bộ dòng.
+    """
+    try:
+        settings.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        marker = settings.STORAGE_DIR / STORAGE_MARKER
+        if not marker.exists():
+            marker.write_text("Thư mục storage của SMS worker — đừng xóa file này.\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def purge_missing_files(qs=None) -> int:
+    """
+    Xóa các dòng `files` mà file trên ổ đĩa không còn (bị xóa tay khỏi storage, đã import xong, quá hạn...)
+    hoặc đã đánh dấu file_deleted (dữ liệu cũ trước khi đổi cách làm). Trả về số dòng đã xóa.
+    An toàn: không thấy file đánh dấu .sms_storage (ổ chưa gắn, Docker gắn sai volume) → không xóa gì.
+    """
+    root = settings.STORAGE_DIR
+    if not (root / STORAGE_MARKER).is_file():       # storage chưa gắn / gắn sai thư mục → không đụng tới bảng
+        return 0
+    qs = File.objects.all() if qs is None else qs
+    gone = [f.id for f in qs.only("id", "file_path", "file_deleted")
+            if f.file_deleted or not (root / f.file_path).is_file()]
+    if gone:
+        File.objects.filter(id__in=gone).delete()
+    return len(gone)

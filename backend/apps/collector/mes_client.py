@@ -22,6 +22,9 @@ from .errors import MesError
 MAIN_TITLE_RE = r".*MESClient.*"
 # Thông báo dạng "đã xong" của MES → tự bấm OK
 INFO_WORDS = ("complete", "success", "saved", "export", "완료", "성공", "저장")
+# Thông báo "không có dữ liệu" khi View/Excel → bấm OK, ghi nhận để collector trả 0 dòng (không phải lỗi)
+NO_DATA_WORDS = ("no data", "no record", "data not found", "no rows", "데이터가 없", "자료가 없", "조회 결과가 없",
+                 "không có dữ liệu")
 
 
 def _norm_menu(text: str) -> str:
@@ -105,6 +108,8 @@ class MesClient:
         self.main = None
         self.hwnd = None
         self.exe_found = ""          # đường dẫn MESClient.exe thật của tiến trình đang chạy
+        self._confirmed = {}         # ô mã đã chọn + xác nhận trong phiên: {"Plant": (mã yêu cầu, ô mã, ô mô tả)}
+        self.no_data_message = ""    # MES báo "không có dữ liệu" (handle_popup ghi lại, collector đọc rồi xóa)
 
     # ================= Kết nối / tự mở =================
     def _attach(self, timeout: float) -> bool:
@@ -233,6 +238,16 @@ class MesClient:
                 closed += 1
                 self.log.info("Đã đóng hộp thoại hỏi nâng cấp (chọn No)")
                 continue
+            if any(w in msg.lower() for w in NO_DATA_WORDS):
+                ok = [b for b in box.descendants(control_type="Button")
+                      if b.window_text().strip().lower() in ("ok", "yes", "확인", "close")]
+                if ok:
+                    winutil.post_click(ok[0].handle)
+                    time.sleep(0.8)
+                    closed += 1
+                    self.no_data_message = msg[:200]
+                    self.log.info("MES báo không có dữ liệu: %s", msg[:120])
+                    continue
             if any(w in msg.lower() for w in INFO_WORDS):
                 ok = [b for b in box.descendants(control_type="Button")
                       if b.window_text().strip().lower() in ("ok", "yes", "확인")]
@@ -244,6 +259,20 @@ class MesClient:
                     continue
             raise MesError(f"Có hộp thoại đang chặn MES: {msg or '(không đọc được nội dung)'}", "MES_POPUP_BLOCKING")
         return closed
+
+    def wait_idle(self, timeout: float = 300) -> float:
+        """
+        Chờ MESClient xử lý xong (luồng giao diện rảnh). MES truy vấn ngay trên luồng giao diện → trong lúc tải dữ liệu
+        cửa sổ không nhận message; gửi WM_NULL tới khi được trả lời = MES đã tải xong. Trả về số giây đã chờ.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                win32gui.SendMessageTimeout(self.hwnd, win32con.WM_NULL, 0, 0, win32con.SMTO_ABORTIFHUNG, 2000)
+                return time.time() - start
+            except Exception:
+                time.sleep(0.5)
+        raise MesError(f"MESClient bận (không phản hồi) quá {int(timeout)}s sau khi bấm View", "MES_BUSY_TIMEOUT")
 
     def wait(self, seconds: float):
         """Chờ nhưng vẫn canh hộp thoại nâng cấp mỗi giây"""
@@ -684,6 +713,277 @@ class MesClient:
             raise MesError(f"Nút '{name}' đang bị khóa", "MES_CONTROL_NOT_FOUND")
         winutil.post_click(btn.handle)
         self.log.info("Bấm nút '%s'", name)
+
+    # ================= Ô mã [code][...][mô tả] (Plant, Oper...) =================
+    def find_code_view(self, form, candidates: list[str], value_re: str | None = None, what: str = ""):
+        """
+        Tìm ô mã Miracom (cdv*) theo danh sách AutomationId; không thấy thì dò mọi ô cdv* trên form có ô txtDisplay
+        đang chứa giá trị khớp `value_re` (vd Plant: ^PL\\w+$). Trả về WindowSpecification của ô cdv.
+        """
+        for aid in candidates:
+            spec = form.child_window(auto_id=aid)
+            if spec.exists(timeout=0.5):
+                return spec
+        if value_re:
+            rx = re.compile(value_re, re.I)
+            try:
+                for w in form.wrapper_object().descendants():
+                    aid = w.element_info.automation_id or ""
+                    if not aid.lower().startswith("cdv"):
+                        continue
+                    spec = form.child_window(auto_id=aid)
+                    edit = spec.child_window(auto_id="txtDisplay")
+                    if edit.exists(timeout=0) and rx.match((edit.wrapper_object().window_text() or "").strip()):
+                        self.log.info("Ô %s trên MES có AutomationId '%s'", what, aid)
+                        return spec
+            except Exception:
+                pass
+        raise MesError(f"Không tìm thấy ô {what} trên màn hình MES (đã thử {candidates}). "
+                       "Chạy `manage.py probe_form \"View Work Order\"` để xem AutomationId", "MES_CONTROL_NOT_FOUND")
+
+    @staticmethod
+    def _edit_text(w) -> str:
+        try:
+            return (w.get_value() or w.window_text() or "").strip()
+        except Exception:
+            try:
+                return (w.window_text() or "").strip()
+            except Exception:
+                return ""
+
+    def code_view_state(self, cdv) -> tuple[str, str, bool]:
+        """(mã đang chọn, mô tả, ô có phần mô tả không)"""
+        code_w = self._control(cdv, "ô nhập mã", auto_id="txtDisplay")
+        code = self._edit_text(code_w)
+        descs = []
+        for e in cdv.wrapper_object().descendants(control_type="Edit"):
+            if e.element_info.automation_id == "txtDisplay":
+                continue
+            descs.append(self._edit_text(e))
+        return code, " ".join(d for d in descs if d), bool(descs)
+
+    @staticmethod
+    def _code_ok(code: str, desc: str, has_desc: bool, value: str) -> bool:
+        """
+        Ô đã nhận mã chưa. Mỗi ô MES hiện khác nhau: Plant hiện mã ở ô chính + tên ở ô mô tả ("PL20" | "TV BOARD PLANT"),
+        Oper thì ngược lại ("SMD" | "2010") → mã nằm ở ô nào cũng được, ô còn lại phải có chữ.
+        """
+        v = value.strip().casefold()
+        c, d = code.strip().casefold(), desc.strip().casefold()
+        if c == v:
+            return bool(d) or not has_desc
+        return d == v and bool(c)
+
+    def _visible_windows(self) -> set[int]:
+        """
+        Mọi cửa sổ đang hiện của MESClient: cửa sổ cấp cao (popup danh sách mã thường là cửa sổ riêng, không tiêu đề)
+        + cửa sổ con của khung chính (popup kiểu control ẩn/hiện ngay trên form). So 2 lần chụp → biết popup mới.
+        """
+        import win32process
+
+        res = set()
+
+        def visit(h, _):
+            try:
+                if win32gui.IsWindowVisible(h) and win32process.GetWindowThreadProcessId(h)[1] == self.pid:
+                    res.add(h)
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(visit, None)
+        res |= {h for h in self._child_hwnds() if win32gui.IsWindowVisible(h)}
+        return res
+
+    def select_code_view(self, cdv, value: str, what: str) -> str:
+        """
+        Chọn mã cho ô [code][...][mô tả] GIỐNG NGƯỜI DÙNG: bấm nút "..." → chọn dòng có mã đó trong danh sách → Enter.
+        (Không điền chữ vào ô: MES không nhận, và ô mô tả còn chữ của lần chọn trước → tưởng đã chọn đúng mà bộ lọc sai.)
+        Xác nhận: sau khi chọn, mã + mô tả trên ô phải đúng là các cột của dòng vừa chọn (vd "SMD" | "2010").
+        Lựa chọn đã xác nhận được nhớ trong phiên → lần sau cùng mã thì bỏ qua (ô vẫn đúng như lúc xác nhận).
+        Trả về mô tả (vd "TV BOARD PLANT").
+        """
+        code, desc, has_desc = self.code_view_state(cdv)
+        if self._confirmed.get(what) == (value, code, desc):
+            self.log.info("%s đã là %s %s", what, code, desc)
+            return desc
+
+        btns = cdv.wrapper_object().descendants(control_type="Button")
+        if not btns:
+            raise MesError(f"Ô {what} không có nút '...' để mở danh sách", "MES_CONTROL_NOT_FOUND")
+        before = self._visible_windows()
+        winutil.post_click(btns[0].handle)
+        popup = set()
+        deadline = time.time() + 6
+        while time.time() < deadline and not popup:
+            time.sleep(0.4)
+            popup = self._visible_windows() - before
+        if not popup:
+            raise MesError(f"Bấm nút '...' của ô {what} nhưng không thấy danh sách xổ ra", "MES_CODE_SELECT_FAILED")
+        cells = self._pick_in_popup(popup, value, what)
+        self.wait(0.8)
+
+        code, desc, has_desc = self.code_view_state(cdv)
+        row = {c.strip().casefold() for c in cells if c and c.strip()}
+        shown = {x.strip().casefold() for x in (code, desc) if x and x.strip()}
+        if self._code_ok(code, desc, has_desc, value) and shown <= row:
+            self._confirmed[what] = (value, code, desc)
+            self.log.info("Chọn %s = %s %s (qua danh sách)", what, code, desc)
+            return desc
+        self._confirmed.pop(what, None)
+        raise MesError(f"Chọn {what} = {value} thất bại: ô đang là '{code}' / '{desc}', dòng đã chọn {cells}",
+                       "MES_CODE_SELECT_FAILED")
+
+    def _pick_in_popup(self, popup: set[int], value: str, what: str) -> list[str]:
+        """
+        Trong danh sách xổ ra: tìm dòng có 1 cột đúng bằng `value` → chọn → Enter. Trả về các cột của dòng đã chọn.
+        Không thấy dòng → Esc + báo lỗi kèm các dòng đọc được.
+        """
+        from pywinauto.controls.common_controls import ListViewWrapper
+
+        want = value.strip().casefold()
+        seen, classes = [], []
+        # Chỉ xét "gốc" của popup (cửa sổ mới hiện mà cửa sổ cha không phải cũng mới hiện)
+        roots = [h for h in popup if win32gui.GetParent(h) not in popup]
+        for top in roots:
+            hs = [top]
+            win32gui.EnumChildWindows(top, lambda c, _: hs.append(c), None)
+            classes += [win32gui.GetClassName(h) for h in hs]
+            # Cách 1: ListView Win32 (đọc được từng ô)
+            for h in hs:
+                if "LISTVIEW" not in win32gui.GetClassName(h).upper():
+                    continue
+                lv = ListViewWrapper(h)
+                ncol = max(lv.column_count(), 1)
+                for i in range(lv.item_count()):
+                    cells = [(lv.get_item(i, j).text() or "").strip() for j in range(ncol)]
+                    seen.append(" ".join(cells))
+                    if want in (c.casefold() for c in cells):
+                        item = lv.get_item(i)
+                        item.ensure_visible()
+                        item.select()
+                        time.sleep(0.3)
+                        winutil.send_key(h, win32con.VK_RETURN, 13)
+                        self._wait_closed(h, roots, what, value)
+                        return cells
+            # Cách 2: UI Automation (danh sách/lưới kiểu khác)
+            try:
+                root = Desktop(backend="uia").window(handle=top).wrapper_object()
+                items = root.descendants(control_type="ListItem") + root.descendants(control_type="DataItem")
+            except Exception:
+                items = []
+            for it in items:
+                try:
+                    texts = [it.window_text()] + [c.window_text() for c in it.descendants()]
+                except Exception:
+                    continue
+                cells = [t.strip() for t in texts if t and t.strip()]
+                seen.append(" ".join(cells))
+                if want in (c.casefold() for c in cells):
+                    try:
+                        it.select()
+                    except Exception:
+                        pass
+                    try:
+                        it.invoke()
+                    except Exception:
+                        winutil.send_key(it.handle or top, win32con.VK_RETURN, 13)
+                    self._wait_closed(it.handle or top, roots, what, value)
+                    return cells
+        for top in roots:
+            winutil.post_keys(top, [win32con.VK_ESCAPE])
+        raise MesError(f"Danh sách {what} không có mã {value}. Các dòng đọc được: {seen[:20] or '(không đọc được)'}; "
+                       f"loại control: {sorted(set(classes))[:15]}", "MES_CODE_SELECT_FAILED")
+
+    def _wait_closed(self, list_h: int, roots: list[int], what: str, value: str):
+        """Chờ danh sách đóng (control danh sách hết hiện). Enter chưa đóng → thử nhấp đúp; vẫn chưa → Esc + báo lỗi"""
+        def is_open():
+            return win32gui.IsWindow(list_h) and win32gui.IsWindowVisible(list_h)
+
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            if not is_open():
+                return
+            time.sleep(0.3)
+        try:   # ListView tự gửi NM_DBLCLK/ItemActivate khi nhận WM_LBUTTONDBLCLK
+            win32gui.SendMessageTimeout(list_h, win32con.WM_LBUTTONDBLCLK, win32con.MK_LBUTTON, 0,
+                                        win32con.SMTO_ABORTIFHUNG, 3000)
+        except Exception:
+            pass
+        time.sleep(1)
+        if is_open():
+            for h in roots:
+                winutil.post_keys(h, [win32con.VK_ESCAPE])
+            raise MesError(f"Đã chọn {value} trong danh sách {what} nhưng danh sách không đóng", "MES_CODE_SELECT_FAILED")
+
+    # ================= Combo (vd kiểu kỳ: Curr.D / Prev.D / ... / Period) =================
+    def find_combo_with_item(self, form, item: str) -> int:
+        """Handle ComboBox trên form có mục `item` (so không phân biệt hoa thường)"""
+        from pywinauto.controls.win32_controls import ComboBoxWrapper
+
+        want = item.strip().casefold()
+        hs = []
+        win32gui.EnumChildWindows(form.wrapper_object().handle, lambda c, _: hs.append(c), None)
+        for h in hs:
+            if "COMBOBOX" not in win32gui.GetClassName(h).upper() or not win32gui.IsWindowVisible(h):
+                continue
+            try:
+                texts = [t.strip().casefold() for t in ComboBoxWrapper(h).item_texts()]
+            except Exception:
+                continue
+            if want in texts:
+                return h
+        raise MesError(f"Không thấy ô chọn có mục '{item}' trên màn hình MES", "MES_CONTROL_NOT_FOUND")
+
+    def select_combo(self, h: int, item: str):
+        """Chọn mục trong ComboBox WinForms: CB_SETCURSEL + báo CBN_SELCHANGE cho form cha (MES nhận như người chọn)"""
+        from pywinauto.controls.win32_controls import ComboBoxWrapper
+
+        cb = ComboBoxWrapper(h)
+        texts = [t.strip() for t in cb.item_texts()]
+        idx = next((i for i, t in enumerate(texts) if t.casefold() == item.strip().casefold()), None)
+        if idx is None:
+            raise MesError(f"Ô chọn không có mục '{item}' (có: {texts})", "MES_CONTROL_NOT_FOUND")
+        if cb.selected_index() != idx:
+            cb.select(idx)
+            time.sleep(0.6)
+        if cb.selected_index() != idx:
+            raise MesError(f"Chọn '{item}' thất bại (đang là '{cb.selected_text()}')", "MES_CONTROL_NOT_FOUND")
+        self.log.info("Chọn kiểu kỳ = %s", texts[idx])
+
+    # ================= Ô ngày (DateTimePicker) =================
+    def get_date(self, form, auto_id: str):
+        """Ngày đang hiện ở ô DateTimePicker (date) hoặc None"""
+        v = winutil.dtp_get(self._control(form, f"ô {auto_id}", auto_id=auto_id).handle)
+        return v.date() if v else None
+
+    def set_date(self, form, auto_id: str, value, what: str, up_first: bool = False):
+        """Đặt ngày cho ô DateTimePicker (dtpFromDate / dtpToDate) rồi đọc lại để chắc chắn MES đã nhận.
+        up_first: xem winutil.dtp_set — "từ ngày" False, "đến ngày" True"""
+        from datetime import datetime as _dt
+
+        w = self._control(form, f"ô {what}", auto_id=auto_id)
+        h = w.handle
+        cls = win32gui.GetClassName(h)
+        if "DATETIMEPICK" not in cls.upper():
+            raise MesError(f"Ô {what} không phải DateTimePicker (loại: {cls})", "MES_DATE_SET_FAILED")
+        deadline = time.time() + 3
+        while not win32gui.IsWindowEnabled(h):
+            if time.time() > deadline:
+                raise MesError(f"Ô {what} đang bị khóa (chưa chọn kiểu kỳ 'Period'?)", "MES_DATE_SET_FAILED")
+            time.sleep(0.3)
+        target = value if isinstance(value, _dt) else _dt(value.year, value.month, value.day)
+        try:
+            retries = winutil.dtp_set(h, target, up_first=up_first)
+        except OSError as e:
+            raise MesError(f"Đặt {what} = {target:%d/%m/%Y} thất bại: {e}", "MES_DATE_SET_FAILED")
+        time.sleep(0.3)
+        got = winutil.dtp_get(h)
+        if got is None or got.date() != target.date():
+            now = f"{got:%d/%m/%Y}" if got else "(trống)"
+            raise MesError(f"Đặt {what} thất bại: muốn {target:%d/%m/%Y}, ô đang là {now}", "MES_DATE_SET_FAILED")
+        self.log.info("Đặt %s = %s (ô hiện '%s'%s)", what, f"{target:%d/%m/%Y}", w.window_text(),
+                      f", thử lại {retries} lần" if retries else "")
 
     def read_period(self, form) -> str:
         try:
