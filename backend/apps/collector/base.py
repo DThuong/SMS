@@ -37,6 +37,8 @@ class BaseCollector:
         self.log.info("Máy agent có bảng tính COM: %s", progid)
         self.mes.connect(self.cfg["exe_path"], self.cfg["auto_start"], self.cfg["start_timeout"])
         self._remember_exe_path()
+        # Hộp thoại Save As / Confirm Save As còn sót của lần chạy trước khóa MES → đóng trước khi làm gì khác
+        self.mes.close_stray_dialogs("trước khi chạy")
         self.mes.handle_popup()
         self.mes.ensure_logged_in(self.cfg["user_id"], self.cfg["password"], self.cfg["login_timeout"])
         self.mes.handle_popup()

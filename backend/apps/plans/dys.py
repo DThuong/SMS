@@ -34,6 +34,10 @@ from apps.core.models import get_setting
 
 DEFAULT_URL = "https://account.dongyang.site/api"   # backend DYS (đổi trong settings dys_api_url / .env DYS_API_URL)
 
+# Cloudflare (Browser Integrity Check) chặn User-Agent mặc định "Python-urllib/3.x" → HTTP 403 "Error 1010".
+# Luôn gửi User-Agent riêng của SMS cho mọi request tới DYS.
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SMS-Worker/1.0 (Dongyang Scan MES System)"
+
 
 class DysError(AgentError):
     """Lỗi khi gọi DYS — có mã riêng để DYS hiện tiêu đề + cách xử lý (collector/errors.py)"""
@@ -89,8 +93,27 @@ def _logical_failure(text: str) -> bool:
     return isinstance(data, dict) and any(data.get(k) is False for k in ("success", "isSuccess", "Success", "IsSuccess"))
 
 
+def _cloudflare_block(status: int, text: str) -> str:
+    """Cloudflare chặn trước khi tới DYS (1010 chữ ký trình duyệt, 1020 luật firewall, 1015 giới hạn tần suất…)"""
+    m = re.search(r"error(?: code)?[:\s]*(10\d\d)", text or "", re.I)
+    if status in (403, 429, 503) and m:
+        return m.group(1)
+    return ""
+
+
 def _send(req: urllib.request.Request, timeout: int) -> tuple[int, str]:
-    """Gửi request → (mã HTTP, nội dung). Mất kết nối → DysError DYS_UNREACHABLE"""
+    """Gửi request → (mã HTTP, nội dung). Mất kết nối / Cloudflare chặn → DysError DYS_UNREACHABLE"""
+    req.add_header("User-Agent", USER_AGENT)
+    status, text = _send_raw(req, timeout)
+    cf = _cloudflare_block(status, text)
+    if cf:
+        raise DysError(f"Cloudflare chặn request tới DYS (HTTP {status}, error {cf}) — request chưa tới backend DYS. "
+                       f"Dùng 'dys_api_url' nội bộ (vd http://172.16.162.123:9000/api) hoặc thêm luật WAF bỏ qua "
+                       f"cho User-Agent 'SMS-Worker' / IP máy MES", "DYS_UNREACHABLE")
+    return status, text
+
+
+def _send_raw(req: urllib.request.Request, timeout: int) -> tuple[int, str]:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             return res.status, res.read().decode("utf-8", "replace")

@@ -69,7 +69,8 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
                          "Kiểm tra 'dys_username' / 'dys_password' trong cài đặt (tài khoản phải có quyền import). "
                          "File vẫn được giữ — sửa xong chạy lại job hoặc import tay trên DYS."),
     "DYS_UNREACHABLE": ("Máy MES không kết nối được DYS",
-                        "Kiểm tra mạng máy MES và 'dys_api_url' (mặc định https://account.dongyang.site/api)."),
+                        "Kiểm tra mạng máy MES và 'dys_api_url'. Cloudflare chặn (error 1010/1020) → đổi 'dys_api_url' sang "
+                        "địa chỉ nội bộ http://172.16.162.123:9000/api (không qua Cloudflare) hoặc thêm luật WAF cho máy MES."),
     "DYS_IMPORT_FAILED": ("DYS từ chối import file",
                           "Xem câu lỗi DYS trả về trong nhật ký. File vẫn được giữ để import lại sau khi sửa."),
     "DYS_DEPARTMENT_MISSING": ("Xưởng chưa gán department DYS",

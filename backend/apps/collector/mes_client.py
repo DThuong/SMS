@@ -5,6 +5,7 @@ Tự mở MESClient, tự đăng nhập khi bị đăng xuất, tự bấm "No" 
 import ctypes
 import logging
 import re
+import shutil
 import subprocess
 import time
 import unicodedata
@@ -25,6 +26,12 @@ INFO_WORDS = ("complete", "success", "saved", "export", "완료", "성공", "저
 # Thông báo "không có dữ liệu" khi View/Excel → bấm OK, ghi nhận để collector trả 0 dòng (không phải lỗi)
 NO_DATA_WORDS = ("no data", "no record", "data not found", "no rows", "데이터가 없", "자료가 없", "조회 결과가 없",
                  "không có dữ liệu")
+# Hộp thoại "Confirm Save As — ... already exists. Do you want to replace it?" của Windows
+OVERWRITE_WORDS = ("already exists", "replace it", "이미 있", "바꾸시겠", "đã tồn tại", "thay thế")
+# Nút đóng hộp thoại an toàn (KHÔNG BAO GIỜ bấm Yes / ghi đè): id chuẩn IDNO = 7, IDCANCEL = 2
+SAFE_BUTTON_IDS = (7, 2)
+SAFE_BUTTON_TEXTS = ("no", "&no", "cancel", "아니요", "아니요(&n)", "취소", "không", "hủy")
+TMP_PREFIX = ".dang_luu_"      # thư mục tạm (rỗng) để hộp thoại Save As lưu vào, lưu xong chuyển file ra ngoài
 
 
 def _norm_menu(text: str) -> str:
@@ -286,6 +293,8 @@ class MesClient:
         """Ô mật khẩu đang hiện (style ES_PASSWORD) = MES đang ở màn hình đăng nhập"""
         res = []
         for top in Desktop(backend="win32").windows(process=self.pid, visible_only=True):
+            if top.class_name() == "#32770":
+                continue          # hộp thoại Windows (Save As, Confirm...) không phải màn hình đăng nhập MES
             for c in [top] + top.descendants(class_name_re=r".*EDIT.*"):
                 try:
                     style = win32gui.GetWindowLong(c.handle, win32con.GWL_STYLE)
@@ -648,13 +657,127 @@ class MesClient:
                            "MES_SAVE_DIALOG_FAILED")
         return edit, save
 
+    # ---------- Dọn hộp thoại Windows còn sót ----------
+    @staticmethod
+    def _dialog_texts(h: int) -> str:
+        kids = []
+        try:
+            win32gui.EnumChildWindows(h, lambda c, _: kids.append(c), None)
+        except Exception:
+            pass
+        texts = [win32gui.GetWindowText(h)]
+        for c in kids:
+            try:
+                if win32gui.GetClassName(c) in ("Static", "DirectUIHWND") or win32gui.GetClassName(c) == "Button":
+                    texts.append(win32gui.GetWindowText(c))
+            except Exception:
+                pass
+        return " | ".join(x.strip() for x in texts if x and x.strip())
+
+    def _dismiss_dialog(self, h: int) -> bool:
+        """Đóng 1 hộp thoại #32770 theo cách an toàn: nút No → Cancel → WM_COMMAND IDCANCEL → WM_CLOSE (không bấm Yes)"""
+        kids = []
+        try:
+            win32gui.EnumChildWindows(h, lambda c, _: kids.append(c), None)
+        except Exception:
+            return False
+        buttons = []
+        for c in kids:
+            try:
+                if win32gui.GetClassName(c) == "Button" and win32gui.IsWindowVisible(c):
+                    buttons.append((c, win32gui.GetDlgCtrlID(c), win32gui.GetWindowText(c).strip().lower()))
+            except Exception:
+                pass
+        for want in SAFE_BUTTON_IDS:
+            for c, cid, _ in buttons:
+                if cid == want:
+                    winutil.post_click(c)
+                    return True
+        for c, _, text in buttons:
+            if text.replace("&", "") in [x.replace("&", "") for x in SAFE_BUTTON_TEXTS]:
+                winutil.post_click(c)
+                return True
+        try:
+            win32gui.PostMessage(h, win32con.WM_COMMAND, 2, 0)      # IDCANCEL
+            win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    def close_stray_dialogs(self, why: str = "") -> int:
+        """
+        Đóng các hộp thoại Windows (Save As, Confirm Save As, báo lỗi lưu file...) còn sót của MESClient.
+        Hộp thoại sót lại khóa MES (modal) → lần chạy sau thao tác sai / tưởng MES đang ở màn hình đăng nhập.
+        Đóng hộp thoại con (Confirm) trước, hộp thoại cha (Save As) sau — lặp vài vòng tới khi hết.
+        """
+        closed, seen = 0, []
+        for _ in range(6):
+            try:
+                hs = list(self.dialogs())
+            except Exception:
+                break
+            if not hs:
+                break
+            for h in hs:
+                seen.append(self._dialog_texts(h)[:120])
+                if self._dismiss_dialog(h):
+                    closed += 1
+            time.sleep(0.8)
+        if closed:
+            self.log.warning("Đã đóng %d hộp thoại Windows còn sót%s: %s", closed, f" ({why})" if why else "",
+                             " || ".join(dict.fromkeys(seen))[:300])
+        return closed
+
     def save_via_dialog(self, dlg, target: Path, timeout: int = 90) -> Path:
         """
-        Điền đường dẫn đầy đủ (không đuôi) vào ô File name, bấm Save.
-        Hộp thoại tự thêm đuôi theo loại file của MES (.xls/.xlsx) → tìm file theo tên gốc.
+        Lưu file MES xuất ra bằng hộp thoại Save As → trả về đường dẫn file cuối cùng (target + đuôi .xls/.xlsx).
+
+        VÌ SAO LƯU QUA THƯ MỤC TẠM RỖNG: thư mục SanLuong còn file cũ (vd 2026-10-29_150055.xls chưa import) →
+        hộp thoại Save As có thể lấy nhầm file đang được chọn / gợi ý tự hoàn thành cùng tiền tố "2026-10-29_"
+        → hiện "Confirm Save As: ... already exists. Do you want to replace it?" → MES bị khóa bởi hộp thoại.
+        Cách làm:
+          1. Tạo thư mục tạm RỖNG riêng cho lần lưu này (storage/SanLuong/.dang_luu_<tên>/)
+          2. Điền đường dẫn thư mục → Save = hộp thoại chuyển vào thư mục rỗng (không còn file nào để chọn nhầm)
+          3. Điền đường dẫn đầy đủ của file → Save
+          4. Hiện hộp thoại hỏi ghi đè → bấm No (không bao giờ ghi đè), lưu lại với tên mới; vẫn bị → báo lỗi
+          5. MES ghi xong → chuyển file ra thư mục đích, xóa thư mục tạm
+        Lỗi ở bất kỳ bước nào → đóng hết hộp thoại còn mở để MES không bị khóa cho lần chạy sau.
         """
-        target.parent.mkdir(parents=True, exist_ok=True)
-        edit_h, save_h = self._save_dialog_controls(dlg.wrapper_object().handle)
+        self._cleanup_tmp_dirs(target.parent)
+        try:
+            for attempt in (1, 2):
+                name = target.name if attempt == 1 else f"{target.name}_{time.strftime('%H%M%S')}"
+                tmp = target.parent / f"{TMP_PREFIX}{name}"
+                tmp.mkdir(parents=True, exist_ok=True)
+                f = self._save_into(dlg, tmp, name, timeout)
+                if f is not None:
+                    return self._move_out(f, target.parent, tmp)
+                self.log.warning("Windows hỏi ghi đè file → đã bấm No, lưu lại với tên mới")
+                dlg = self._current_save_dialog(dlg)
+            raise MesError("Hộp thoại Save As vẫn hỏi ghi đè sau khi đổi tên file", "MES_SAVE_DIALOG_FAILED")
+        except Exception:
+            self.close_stray_dialogs("lưu file lỗi")
+            raise
+
+    def _current_save_dialog(self, dlg):
+        """Hộp thoại Save As còn mở sau khi bấm No ở hộp thoại hỏi ghi đè"""
+        h = dlg.wrapper_object().handle if hasattr(dlg, "wrapper_object") else dlg.handle
+        if win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+            return dlg
+        raise MesError("Hộp thoại Save As đã đóng sau khi từ chối ghi đè", "MES_SAVE_DIALOG_FAILED")
+
+    def _save_into(self, dlg, folder: Path, name: str, timeout: int) -> Path | None:
+        """Điền + bấm Save rồi chờ file xuất hiện trong `folder`. None = Windows hỏi ghi đè (đã bấm No)"""
+        dlg_h = dlg.wrapper_object().handle
+        edit_h, save_h = self._save_dialog_controls(dlg_h)
+        # Bước 1: chuyển hộp thoại vào thư mục tạm rỗng (điền đường dẫn thư mục + Save = mở thư mục đó)
+        winutil.set_text(edit_h, str(folder))
+        winutil.post_click(save_h)
+        time.sleep(1.2)
+        if win32gui.IsWindow(dlg_h):
+            edit_h, save_h = self._save_dialog_controls(dlg_h)
+        # Bước 2: tên file đầy đủ (vẫn dùng đường dẫn tuyệt đối — bước 1 không chuyển được thư mục cũng lưu đúng chỗ)
+        target = folder / name
         winutil.set_text(edit_h, str(target))
         winutil.post_click(save_h)
         self.log.info("Lưu file vào: %s.*", target)
@@ -663,13 +786,18 @@ class MesClient:
         while time.time() < deadline:
             time.sleep(1)
             self.handle_popup()
-            # Hộp thoại báo lỗi (đường dẫn sai, file đang mở...) của Windows
+            # Hộp thoại khác của Windows trong lúc lưu: hỏi ghi đè → No; còn lại (đường dẫn sai, file đang mở...) → lỗi
             for h in self.dialogs():
-                w = Desktop(backend="win32").window(handle=h)
-                if h != dlg.handle and w.exists(timeout=0):
-                    texts = [c.window_text() for c in w.wrapper_object().descendants() if c.window_text().strip()]
-                    raise MesError(f"Windows báo khi lưu file: {' | '.join(texts)[:300]}", "MES_SAVE_DIALOG_FAILED")
-            files = [f for f in target.parent.glob(target.name + "*") if f.is_file()]
+                if h == dlg_h or not win32gui.IsWindowVisible(h):
+                    continue
+                text = self._dialog_texts(h)
+                if any(w in text.lower() for w in OVERWRITE_WORDS):
+                    self._dismiss_dialog(h)
+                    time.sleep(1)
+                    self.log.warning("Windows hỏi ghi đè: %s", text[:200])
+                    return None
+                raise MesError(f"Windows báo khi lưu file: {text[:300]}", "MES_SAVE_DIALOG_FAILED")
+            files = [f for f in folder.glob(name + "*") if f.is_file()]
             if files:
                 f = max(files, key=lambda x: x.stat().st_mtime)
                 size = f.stat().st_size
@@ -678,7 +806,37 @@ class MesClient:
                 if stable >= 2:
                     self.log.info("MES đã ghi xong file %s (%d byte)", f.name, size)
                     return f
-        raise MesError(f"Sau {timeout}s chưa thấy file được lưu ở {target.parent}", "MES_SAVE_DIALOG_FAILED")
+        raise MesError(f"Sau {timeout}s chưa thấy file được lưu ở {folder}", "MES_SAVE_DIALOG_FAILED")
+
+    def _move_out(self, f: Path, dest_dir: Path, tmp: Path) -> Path:
+        """Chuyển file từ thư mục tạm ra thư mục đích (MES có thể còn giữ file vài giây → thử lại)"""
+        dest = dest_dir / f.name
+        i = 1
+        while dest.exists():
+            dest, i = dest_dir / f"{f.stem}_{i}{f.suffix}", i + 1
+        for _ in range(15):
+            try:
+                shutil.move(str(f), str(dest))
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            self.log.warning("Chưa chuyển được %s ra ngoài (MES còn giữ file) — dùng luôn file trong thư mục tạm", f.name)
+            return f
+        try:
+            tmp.rmdir()
+        except OSError:
+            pass
+        return dest
+
+    def _cleanup_tmp_dirs(self, parent: Path):
+        """Xóa thư mục tạm RỖNG còn sót của các lần lưu trước (thư mục còn file thì giữ — file đó vẫn đang được dùng)"""
+        try:
+            for d in parent.glob(TMP_PREFIX + "*"):
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+        except OSError:
+            pass
 
     # ================= Thao tác trên form =================
     def _control(self, form, what: str, **criteria):
