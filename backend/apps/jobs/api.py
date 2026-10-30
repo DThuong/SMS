@@ -10,10 +10,13 @@ API: job (bảng jobs), lần chạy (job_runs), nhật ký (job_logs)
   GET  /api/runs/{id}/logs/{seq}/screenshot    ảnh màn hình MES lúc lỗi
 
 Luồng sản lượng cho DYS:
-  1. POST /api/jobs/PRODUCTION_OUTPUT/run {"report_date": "2026-10-28", "wait_seconds": 90}
+  1. POST /api/jobs/PRODUCTION_OUTPUT/run
+       1 ngày:     {"report_date": "2026-10-28"}
+       nhiều ngày: {"date_from": "2026-10-25", "date_to": "2026-10-28"}   (tối đa 31 ngày, agent lặp từng ngày)
   2. finished=false → gọi GET /api/runs/{id} vài giây một lần tới khi finished=true
-  3. status=success → files[0].download_url → tải file → DYS gọi POST /api/ProductionResult/import (của DYS)
-  4. POST /api/files/{file_id}/import-result {"success": true, "message": "..."}
+     status: success = đủ ngày · partial = có ngày lỗi (xem error) · failed = không lấy được ngày nào
+  3. files[] — MỖI NGÀY 1 FILE (report_date) → tải download_url → DYS gọi POST /api/ProductionResult/import (của DYS)
+  4. Mỗi file: POST /api/files/{file_id}/import-result {"success": true, "message": "..."}
 
 Luồng kế hoạch Work Order cho DYS (mỗi xưởng một file):
   1. POST /api/jobs/WORKORDER_PLAN/run {"opers": ["2010", "3010"], "wait_seconds": 90}   (bỏ opers = mọi xưởng)
@@ -86,25 +89,52 @@ def update_job(request, code: str, data: JobIn):
     return _job_out(job)
 
 
+MAX_RANGE_DAYS = 31                     # PRODUCTION_OUTPUT: tối đa 31 ngày / 1 lần chạy (mỗi ngày MES ~1 phút)
+
+
 class RunIn(Schema):
-    report_date: date | None = None     # PRODUCTION_OUTPUT: ngày cần lấy. Bỏ trống = hôm nay (giờ VN)
+    report_date: date | None = None     # PRODUCTION_OUTPUT: lấy 1 ngày. Bỏ trống (và không có date_from) = hôm nay
+    date_from: date | None = None       # PRODUCTION_OUTPUT: lấy nhiều ngày — từ ngày (MES mỗi lần chỉ 1 ngày → agent lặp)
+    date_to: date | None = None         #   đến ngày (bỏ trống = bằng date_from). Mỗi ngày ra 1 file
     opers: list[str] | None = None      # WORKORDER_PLAN: chỉ lấy các xưởng này. Bỏ trống = mọi xưởng đang dùng
     wait_seconds: int = 0               # >0: giữ kết nối chờ job xong (tối đa 90s vì Cloudflare cắt request sau 100s)
+
+
+def _report_dates(data: RunIn) -> list[date]:
+    """Danh sách ngày sản lượng cần lấy: date_from..date_to, hoặc report_date. [] = để job tự lấy hôm nay"""
+    from datetime import timedelta
+
+    today = timezone.localdate()
+    if data.date_from or data.date_to:
+        start = data.date_from or data.date_to
+        end = data.date_to or start
+        if start > end:
+            raise HttpError(400, f"Từ ngày ({start:%d/%m/%Y}) phải trước hoặc bằng đến ngày ({end:%d/%m/%Y})")
+    elif data.report_date:
+        start = end = data.report_date
+    else:
+        return []
+    if end > today:
+        raise HttpError(400, f"Không lấy được ngày tương lai ({end:%d/%m/%Y}); hôm nay là {today:%d/%m/%Y}")
+    n = (end - start).days + 1
+    if n > MAX_RANGE_DAYS:
+        raise HttpError(400, f"Tối đa {MAX_RANGE_DAYS} ngày mỗi lần chạy (đang chọn {n} ngày)")
+    return [start + timedelta(days=i) for i in range(n)]
 
 
 @router.post("/jobs/{code}/run")
 def run_job(request, code: str, data: RunIn):
     """Đưa job vào hàng đợi, worker chạy ngay ở vòng lặp kế tiếp (≤5s). Header X-Requested-By = người bấm bên DYS"""
     job = get_object_or_404(Job, code=code)
-    if data.report_date and data.report_date > timezone.localdate():
-        raise HttpError(400, f"Không lấy được ngày tương lai ({data.report_date}); hôm nay là {timezone.localdate()}")
+    report_dates = _report_dates(data)
     pending = job.runs.filter(status__in=PENDING).order_by("id").first()
     if pending:
         raise HttpError(409, f"Job đang chờ/đang chạy (run id={pending.id}). Theo dõi: GET /api/runs/{pending.id}")
 
     params = dict(job.params or {})
-    if data.report_date:
-        params["report_date"] = data.report_date.isoformat()
+    if report_dates:
+        params.pop("report_date", None)
+        params["report_dates"] = [d.isoformat() for d in report_dates]
     if data.opers:
         from apps.core.models import Oper
         codes = [c.strip() for c in data.opers if c and c.strip()]

@@ -1,4 +1,4 @@
-"""API: sức khỏe, xưởng (bảng opers), cài đặt (bảng settings), dashboard"""
+"""API: sức khỏe, phiên đăng nhập bằng API key, xưởng (opers), cài đặt (settings), hạn lưu dữ liệu, dashboard"""
 from datetime import timedelta
 
 from django.db.models import Count, Sum
@@ -8,10 +8,12 @@ from django.utils import timezone
 from ninja import Router, Schema
 from ninja.errors import HttpError
 
-from .models import Oper, Setting
+from .models import Oper, Setting, get_setting
+from .security import create_session, session_minutes, verify_key
 
 router = Router(tags=["Core"])
 health_router = Router(tags=["Health"])
+auth_router = Router(tags=["Auth"])
 
 
 @health_router.get("/health", auth=None)
@@ -21,6 +23,29 @@ def health(request):
     with connection.cursor() as c:
         c.execute("SELECT 1")
     return {"ok": True, "time": timezone.localtime()}
+
+
+# ---------------- Phiên (API key → token 15 phút) ----------------
+class SessionIn(Schema):
+    api_key: str
+
+
+@auth_router.post("/auth/session", auth=None)
+def create_api_session(request, data: SessionIn):
+    """
+    Đổi API key lấy token phiên (hạn `session_minutes`, mặc định 15 phút).
+    Gửi token ở header `Authorization: Bearer <token>` cho mọi API khác. Hết hạn → gọi lại API này.
+    """
+    key = verify_key(data.api_key)
+    if not key:
+        raise HttpError(401, "API key sai hoặc đã bị khóa")
+    return create_session(key)
+
+
+@auth_router.get("/auth/session")
+def current_session(request):
+    """Kiểm tra token hiện tại còn dùng được không (401 = hết hạn/không hợp lệ)"""
+    return {"ok": True, "name": request.auth.name, "session_minutes": session_minutes()}
 
 
 # ---------------- Oper ----------------
@@ -109,6 +134,53 @@ def update_setting(request, key: str, data: SettingIn):
     s.value = value
     s.save()
     return _setting_out(s)
+
+
+# ---------------- Hạn lưu dữ liệu (job CLEANUP) ----------------
+RETENTION_KEY = "data_retention_days"
+
+
+class RetentionIn(Schema):
+    days: int                  # 1..365 — xóa file + dữ liệu sản lượng & kế hoạch cũ hơn số ngày này
+
+
+def _retention_out() -> dict:
+    from apps.jobs.models import Job
+    from apps.plans.models import File
+
+    days = max(1, get_setting(RETENTION_KEY, 3))
+    limit = timezone.now() - timedelta(days=days)
+    job = Job.objects.filter(code="CLEANUP").first()
+    old = File.objects.filter(created_at__lt=limit)
+    return {
+        "days": days,
+        "delete_before": limit,
+        "cleanup_job": None if not job else {"cron": job.cron, "is_active": job.is_active,
+                                             "next_run_at": job.next_run_at},
+        # Số file sẽ bị xóa ở lần dọn kế tiếp
+        "pending_delete": {"production": old.filter(kind=File.Kind.PRODUCTION).count(),
+                           "workorder": old.filter(kind=File.Kind.WORKORDER).count()},
+    }
+
+
+@router.get("/retention", tags=["Retention"])
+def get_retention(request):
+    """Số ngày giữ dữ liệu hiện tại + lịch dọn + số file sắp bị xóa"""
+    return _retention_out()
+
+
+@router.put("/retention", tags=["Retention"])
+def update_retention(request, data: RetentionIn):
+    """
+    Đổi số ngày giữ dữ liệu sản lượng & kế hoạch (mặc định 3).
+    Áp dụng ở lần chạy job CLEANUP kế tiếp; muốn xóa ngay: POST /api/jobs/CLEANUP/run
+    """
+    if not 1 <= data.days <= 365:
+        raise HttpError(400, "Số ngày phải từ 1 đến 365")
+    Setting.objects.update_or_create(key=RETENTION_KEY, defaults={
+        "value": str(data.days), "value_type": Setting.ValueType.INT, "label": "Giữ dữ liệu (ngày)",
+        "description": "Job CLEANUP xóa file + dữ liệu sản lượng và kế hoạch cũ hơn số ngày này"})
+    return _retention_out()
 
 
 # ---------------- Dashboard ----------------

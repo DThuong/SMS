@@ -34,7 +34,7 @@ class Command(BaseCommand):
             ("PRODUCTION_OUTPUT", "Lấy sản lượng theo giờ (TV)", "0 8 * * *",
              "MES → Inquiry → 타임별 실적 조회(TV) → ngày hiện tại → View → Excel → lưu file chờ DYS import"),
             ("CLEANUP", "Dọn file & dữ liệu cũ", "30 23 * * *",
-             "Xóa file kế hoạch, file sản lượng và dữ liệu Work Order quá hạn lưu"),
+             "Xóa file + dữ liệu sản lượng và kế hoạch cũ hơn data_retention_days (mặc định 3 ngày)"),
         ]:
             job, created = Job.objects.get_or_create(
                 code=code, defaults={"name": name, "cron": cron, "description": desc})

@@ -69,11 +69,15 @@ DEFAULT_SETTINGS = [
      "Tự bấm No mỗi khi MES hỏi nâng cấp phiên bản", False),
     ("delete_file_after_import", "true", "bool", "Xóa file sau khi DYS import",
      "DYS báo import thành công thì xóa file sản lượng trên máy", False),
-    ("file_retention_days", "30", "int", "Giữ file (ngày)", "Xóa file Excel cũ hơn số ngày này", False),
-    ("workorder_retention_days", "90", "int", "Giữ dữ liệu WO (ngày)", "Xóa dữ liệu Work Order trong DB cũ hơn số ngày này", False),
+    ("data_retention_days", "3", "int", "Giữ dữ liệu (ngày)",
+     "Job CLEANUP xóa file + dữ liệu sản lượng và kế hoạch (Work Order) cũ hơn số ngày này. "
+     "Sửa qua PUT /api/retention", False),
+    ("session_minutes", "15", "int", "Thời lượng phiên API (phút)",
+     "Token phiên đổi từ API key chỉ dùng được tối đa số phút này", False),
 ]
 OBSOLETE_SETTINGS = ["dys_api_url", "dys_production_import_path", "dys_report_date_format",
-                     "dys_timeout_seconds", "dys_verify_ssl"]
+                     "dys_timeout_seconds", "dys_verify_ssl",
+                     "file_retention_days", "workorder_retention_days"]   # đã gộp thành data_retention_days
 
 
 class ApiKey(models.Model):
@@ -81,7 +85,8 @@ class ApiKey(models.Model):
     Bảng `api_keys` — khóa dùng API, cấp cho từng người/nhóm bên DYS. Lưu SHA-256, không lưu khóa gốc.
     Thêm: python manage.py api_key add "Tên người dùng"
       hoặc Workbench: INSERT INTO api_keys (name, key_hash, is_active, note, use_count, created_at)
-                      VALUES ('Tên', SHA2('khoa-bi-mat', 256), 1, '', 0, NOW());
+                      VALUES ('Tên', SHA2('khoa-bi-mat', 256), 1, '', 0, UTC_TIMESTAMP());
+    'khoa-bi-mat' chính là chuỗi điền vào DYS (DYS dùng nó gọi POST /api/auth/session lấy phiên 15 phút).
     """
     name = models.CharField("Cấp cho", max_length=150)
     key_hash = models.CharField("SHA-256 của khóa", max_length=64, unique=True)

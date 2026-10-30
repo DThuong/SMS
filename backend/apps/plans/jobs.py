@@ -107,52 +107,76 @@ def parse_report_date(value):
 
 
 def production_output(run, log):
-    """MES → Inquiry → 타임별 실적 조회(TV) → FROM_DATE → View → Excel → lưu file chờ DYS tải về import"""
+    """
+    MES → Inquiry → 타임별 실적 조회(TV) → FROM_DATE → View → Excel → lưu file chờ DYS tải về import.
+    MES mỗi lần chỉ xem được 1 ngày → params.report_dates nhiều ngày thì lặp lần lượt, mỗi ngày 1 file.
+    """
     from apps.collector.errors import AgentError
 
     params = run.params or {}
+    raw = params.get("report_dates") or [params.get("report_date")]
     try:
-        report_date = parse_report_date(params.get("report_date"))
+        dates = sorted({parse_report_date(v) for v in raw})
     except ValueError as e:
         raise AgentError(str(e), "INVALID_PARAMS")
-    log.info("Ngày sản lượng cần lấy: %s", report_date.strftime("%d/%m/%Y"))
+    log.info("Ngày sản lượng cần lấy (%d ngày): %s", len(dates), ", ".join(f"{d:%d/%m/%Y}" for d in dates))
 
     ProductionCollector = _load_collector("production")
     collector = ProductionCollector(log, mes_config())
     try:
         collector.open()
-        path, rows, export_dt = collector.collect(report_date, production_target(report_date))
     except Exception as e:
-        _screenshot(collector, run, "production", log, f"Lỗi khi lấy sản lượng: {e}")
+        _screenshot(collector, run, "production_open", log, f"Không chuẩn bị được MES: {e}")
         raise
 
-    report = register_production_file(run, report_date, path, rows, export_dt)
-    log.info("Đã lưu %s (%d dòng dữ liệu) — sẵn sàng cho DYS tải về import", path, report.rows)
-    return report.rows
+    total, errors, first_code = 0, [], None
+    for i, d in enumerate(dates, 1):
+        log.info("----- [%d/%d] Ngày %s -----", i, len(dates), d.strftime("%d/%m/%Y"))
+        try:
+            path, rows, export_dt = collector.collect(d, production_target(d))
+            report = register_production_file(run, d, path, rows, export_dt)
+            log.info("Đã lưu %s (%d dòng dữ liệu) — sẵn sàng cho DYS tải về import", path.name, report.rows)
+            total += report.rows
+        except Exception as e:
+            errors.append(f"{d:%d/%m/%Y}: {e}")
+            first_code = first_code or getattr(e, "code", None)
+            _screenshot(collector, run, f"production_{d:%Y%m%d}", log, f"Lỗi khi lấy sản lượng ngày {d:%d/%m/%Y}: {e}")
+            collector.form = None          # mở lại form ở ngày kế tiếp cho chắc
+
+    if errors and len(errors) == len(dates):
+        raise AgentError("; ".join(errors), first_code or "UNKNOWN")
+    return total, errors
 
 
 def cleanup(run, log):
-    """Xóa file (giữ dòng trong bảng files), dòng work_orders và ảnh lỗi quá hạn lưu trữ"""
-    now = timezone.now()
-    file_days = get_setting("file_retention_days", 30)
-    wo_days = get_setting("workorder_retention_days", 90)
+    """
+    Xóa dữ liệu cũ hơn `data_retention_days` ngày (mặc định 3):
+      - file sản lượng + file kế hoạch: xóa file trên ổ đĩa VÀ dòng trong bảng files
+      - dòng work_orders đi theo file (CASCADE)
+      - ảnh màn hình lỗi cũ
+    """
+    days = max(1, get_setting("data_retention_days", 3))
+    limit = timezone.now() - timedelta(days=days)
+    log.info("Xóa dữ liệu sản lượng & kế hoạch cũ hơn %d ngày (trước %s)",
+             days, timezone.localtime(limit).strftime("%d/%m/%Y %H:%M"))
 
-    n_files = 0
-    for f in File.objects.filter(created_at__lt=now - timedelta(days=file_days), file_deleted=False):
-        delete_file_on_disk(f)
-        n_files += 1
-    log.info("Đã xóa %d file cũ hơn %d ngày", n_files, file_days)
-
-    n_wo, _ = WorkOrder.objects.filter(file__export_date__lt=now - timedelta(days=wo_days)).delete()
-    log.info("Đã xóa %d dòng Work Order cũ hơn %d ngày", n_wo, wo_days)
+    old = File.objects.filter(created_at__lt=limit)
+    counts = {}
+    for kind, label in File.Kind.choices:
+        counts[kind] = old.filter(kind=kind).count()
+    n_wo = WorkOrder.objects.filter(file__in=old).count()
+    for f in old.filter(file_deleted=False):
+        delete_file_on_disk(f)                 # xóa file .xlsx/.xls trên ổ đĩa trước
+    n_files, _ = old.delete()                  # rồi xóa dòng files (work_orders xóa theo CASCADE)
+    log.info("Đã xóa %d file sản lượng, %d file kế hoạch, %d dòng Work Order",
+             counts.get(File.Kind.PRODUCTION, 0), counts.get(File.Kind.WORKORDER, 0), n_wo)
 
     n_shots = 0
     shot_dir = settings.SCREENSHOT_DIR
     if shot_dir.exists():
-        limit = (now - timedelta(days=file_days)).timestamp()
         for p in shot_dir.glob("*.png"):
-            if p.stat().st_mtime < limit:
-                p.unlink()
+            if p.stat().st_mtime < limit.timestamp():
+                p.unlink(missing_ok=True)
                 n_shots += 1
     log.info("Đã xóa %d ảnh lỗi cũ", n_shots)
-    return n_files + n_wo
+    return sum(counts.values()) + n_wo
