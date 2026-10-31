@@ -6,6 +6,7 @@ API: file lấy từ MES (bảng files) — DYS tải file về, import vào DB 
   GET    /api/files/{id}/download       tải file .xlsx
   POST   /api/files/{id}/import-result  DYS báo kết quả import file (sản lượng / kế hoạch)
   DELETE /api/files/{id}                xóa file trên ổ đĩa + dòng trong files
+  GET    /api/import-history            lịch sử import vào DYS thành công (file đã xóa vẫn còn lịch sử)
 
 File không còn trong storage (DYS import xong, CLEANUP, xóa tay...) thì dòng trong bảng files cũng bị xóa:
 mỗi lần đọc danh sách / chi tiết / tải file, SMS dọn các dòng có file đã mất.
@@ -20,7 +21,7 @@ from ninja.errors import HttpError
 
 from apps.core.timeutil import filter_days
 
-from .models import File
+from .models import File, ImportDysHistory
 from .services import delete_file_and_row, purge_missing_files
 
 router = Router()
@@ -38,7 +39,23 @@ def file_out(f: File) -> dict:
         "status": f.status, "status_label": f.get_status_display(), "file_deleted": f.file_deleted,
         "download_url": None if f.file_deleted else f"/api/files/{f.id}/download",
         "imported_at": f.imported_at, "imported_by": f.imported_by, "dys_message": f.dys_message,
-        "created_at": f.created_at,
+        "created_at": f.created_at, "source": "file",
+    }
+
+
+def history_out(h: ImportDysHistory) -> dict:
+    """1 dòng lịch sử import DYS — CÙNG dạng với file_out để DYS hiển thị chung (file đã xóa: download_url = null)"""
+    return {
+        "id": h.id, "kind": h.kind, "kind_label": h.get_kind_display(), "run_id": h.run_id,
+        "plant": h.plant_code or None, "plant_name": h.plant.name if h.plant_id else (h.plant_code or None),
+        "oper": h.oper_code or None, "oper_name": h.oper_name or None,
+        "period_from": h.period_from, "period_to": h.period_to,
+        "report_date": h.report_date, "export_date": h.export_date,
+        "file_name": h.file_name, "rows": h.rows, "size": 0,
+        "status": File.Status.IMPORTED, "status_label": File.Status.IMPORTED.label, "file_deleted": True,
+        "download_url": None,
+        "imported_at": h.imported_at, "imported_by": h.imported_by, "dys_message": h.dys_message,
+        "created_at": h.created_at, "source": "history", "file_id": h.file_id,
     }
 
 
@@ -132,3 +149,28 @@ def delete_file(request, file_id: int, with_data: bool = True):
     f = get_object_or_404(File, id=file_id)
     delete_file_and_row(f)
     return {"ok": True, "deleted": "file+data"}
+
+
+# ======================= LỊCH SỬ IMPORT DYS =======================
+class HistoryFilter(Schema):
+    kind: File.Kind | None = None       # workorder | production
+    oper: str | None = None             # mã xưởng
+    report_date: date | None = None     # ngày sản lượng
+    date_from: date | None = None       # theo export_date (giờ VN)
+    date_to: date | None = None
+    page: int = 1
+    page_size: int = 20
+
+
+@router.get("/import-history", tags=["File"], summary="Lịch sử import vào DYS thành công")
+def list_import_history(request, f: Query[HistoryFilter]):
+    """Mỗi lần import vào DYS thành công 1 dòng (file đã bị xóa vẫn còn ở đây tới khi CLEANUP xóa theo data_retention_days)"""
+    qs = ImportDysHistory.objects.select_related("plant")
+    if f.kind:
+        qs = qs.filter(kind=f.kind)
+    if f.oper:
+        qs = qs.filter(oper_code=f.oper)
+    if f.report_date:
+        qs = qs.filter(report_date=f.report_date)
+    qs = filter_days(qs, "export_date", f.date_from, f.date_to)
+    return _page(qs.order_by("-imported_at", "-id"), f.page, f.page_size, history_out)

@@ -73,11 +73,29 @@ def mark_import_result(report, success: bool, message: str = "", imported_by: st
     report.imported_at = timezone.now() if success else None
     report.imported_by = imported_by[:150]
     report.dys_message = message[:5000]
+    if success:
+        record_import_history(report)       # ghi lịch sử TRƯỚC khi xóa file + dòng files
     if success and delete_file:
         delete_file_and_row(report)
         return True
     report.save()
     return False
+
+
+def record_import_history(f: File):
+    """Ghi 1 dòng import_dys_history cho file vừa vào DYS thành công (không làm hỏng lần import nếu ghi lỗi)"""
+    from .models import ImportDysHistory
+    try:
+        ImportDysHistory.objects.create(
+            kind=f.kind, run_id=f.run_id, file_id=f.pk, plant_id=f.plant_id, oper_id=f.oper_id,
+            plant_code=f.plant.code if f.plant_id else "", oper_code=f.oper.code if f.oper_id else "",
+            oper_name=f.oper.name if f.oper_id else "", report_date=f.report_date,
+            period_from=f.period_from, period_to=f.period_to, file_name=f.file_name, rows=f.rows,
+            export_date=f.export_date, imported_at=f.imported_at or timezone.now(),
+            imported_by=f.imported_by, dys_message=f.dys_message)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Không ghi được import_dys_history cho file %s", f.pk)
 
 
 def delete_file_and_row(f: File):

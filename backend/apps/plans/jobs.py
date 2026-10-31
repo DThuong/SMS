@@ -306,6 +306,7 @@ def cleanup(run, log):
     Xóa dữ liệu cũ hơn `data_retention_days` ngày (mặc định 3):
       - file sản lượng + file kế hoạch: xóa file trên ổ đĩa VÀ dòng trong bảng files
       - ảnh màn hình lỗi cũ
+      - lịch sử import DYS (import_dys_history) cũ
     """
     days = max(1, get_setting("data_retention_days", 3))
     limit = timezone.now() - timedelta(days=days)
@@ -332,6 +333,10 @@ def cleanup(run, log):
     if n_kept:
         log.warning("Giữ lại %d file CHƯA vào DYS (quá %d ngày nhưng chưa import được, giữ tối đa %d ngày): %s",
                     n_kept, days, FAILED_KEEP_DAYS, ", ".join(kept.values_list("file_name", flat=True)[:20]))
+    from .models import ImportDysHistory
+    n_hist, _ = ImportDysHistory.objects.filter(imported_at__lt=limit).delete()
+    log.info("Đã xóa %d dòng lịch sử import DYS cũ", n_hist)
+
     n_missing = purge_missing_files()          # dòng còn lại mà file đã mất (xóa tay, import xong...)
     if n_missing:
         log.info("Đã xóa %d dòng file không còn trong storage", n_missing)

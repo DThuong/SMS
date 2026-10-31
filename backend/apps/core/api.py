@@ -276,48 +276,70 @@ def update_retention(request, data: RetentionIn):
 def dashboard(request):
     from apps.jobs.api import _job_out, _run_out
     from apps.jobs.models import Job, JobRun, WorkerStatus
-    from apps.plans.api import file_out
-    from apps.plans.models import File
+    from apps.plans.api import file_out, history_out
+    from apps.plans.models import File, ImportDysHistory
     from apps.plans.services import purge_missing_files
 
     purge_missing_files()                   # file đã mất khỏi storage → bỏ dòng trước khi đếm
     now = timezone.localtime()
     today = now.date()
-    workorders = File.objects.filter(kind=File.Kind.WORKORDER)
+    since = day_start(today - timedelta(days=13))
 
-    # Số dòng kế hoạch lấy được hôm nay theo xưởng (file mới nhất trong ngày) — 1 truy vấn cho mọi xưởng
+    # Nguồn dữ liệu = LỊCH SỬ import DYS (file đã vào DYS bị xóa ngay) + file CÒN trên máy (chưa / lỗi import).
+    # Bỏ file đã có trong lịch sử (delete_file_after_import = false) để không đếm 2 lần.
+    hist_wo = list(ImportDysHistory.objects.filter(kind=File.Kind.WORKORDER, export_date__gte=since)
+                   .values("file_id", "oper_id", "oper_code", "rows", "export_date", "imported_at"))
+    in_hist = {h["file_id"] for h in hist_wo if h["file_id"]}
+    file_wo = [dict(f, imported_at=None) for f in
+               File.objects.filter(kind=File.Kind.WORKORDER, export_date__gte=since).exclude(id__in=in_hist)
+               .values("id", "oper_id", "oper__code", "rows", "export_date", "status")]
+    items = ([{"oper_id": h["oper_id"], "oper": h["oper_code"], "rows": h["rows"], "export_date": h["export_date"],
+               "imported_at": h["imported_at"], "status": File.Status.IMPORTED} for h in hist_wo]
+             + [{"oper_id": f["oper_id"], "oper": f["oper__code"], "rows": f["rows"], "export_date": f["export_date"],
+                 "imported_at": None, "status": f["status"]} for f in file_wo])
+
+    # Số dòng kế hoạch lấy được hôm nay theo xưởng (lần lấy mới nhất trong ngày)
+    t0, t1 = day_start(today), day_end(today)
     latest = {}
-    for f in (workorders.filter(export_date__gte=day_start(today), export_date__lt=day_end(today))
-              .order_by("oper_id", "-export_date").values("oper_id", "rows", "export_date")):
-        latest.setdefault(f["oper_id"], f)
+    for it in sorted((i for i in items if t0 <= i["export_date"] < t1), key=lambda i: i["export_date"], reverse=True):
+        latest.setdefault(it["oper_id"], it)
     today_by_oper = []
     for oper in Oper.objects.filter(is_active=True):
         f = latest.get(oper.id)
         today_by_oper.append({"oper": oper.code, "name": oper.name,
-                              "rows": f["rows"] if f else 0, "export_date": f["export_date"] if f else None})
+                              "rows": f["rows"] if f else 0, "export_date": f["export_date"] if f else None,
+                              "imported_at": f["imported_at"] if f else None,      # đã vào DYS lúc (null = chưa)
+                              "status": f["status"] if f else None})
 
     # 14 ngày gần nhất: gom theo ngày (giờ VN) bằng Python — không dùng TruncDate (MySQL thiếu bảng múi giờ)
     sums = {}
-    for f in (workorders.filter(export_date__gte=day_start(today - timedelta(days=13)))
-              .values_list("export_date", "oper__code", "rows")):
-        k = (timezone.localtime(f[0]).date(), f[1])
-        sums[k] = sums.get(k, 0) + (f[2] or 0)
+    for it in items:
+        k = (timezone.localtime(it["export_date"]).date(), it["oper"])
+        sums[k] = sums.get(k, 0) + (it["rows"] or 0)
     daily = [{"day": d, "oper__code": o, "rows": n} for (d, o), n in sorted(sums.items())]
 
     runs_7d = (JobRun.objects.filter(created_at__gte=now - timedelta(days=7))
                .values("status").annotate(n=Count("id")))
 
     ws = WorkerStatus.objects.filter(pk=1).first()
-    production_today = (File.objects.select_related("oper")
-                        .filter(kind=File.Kind.PRODUCTION, report_date__gte=today - timedelta(days=1))
-                        .order_by("-report_date", "-id").first())   # job định kỳ lấy ngày hôm qua
+    # Sản lượng mới nhất của hôm nay / hôm qua (job định kỳ lấy ngày hôm qua): lịch sử import hoặc file còn trên máy
+    p_since = today - timedelta(days=1)
+    p_hist = (ImportDysHistory.objects.select_related("plant")
+              .filter(kind=File.Kind.PRODUCTION, report_date__gte=p_since)
+              .order_by("-report_date", "-export_date", "-id").first())
+    p_file = (File.objects.select_related("oper", "plant")
+              .filter(kind=File.Kind.PRODUCTION, report_date__gte=p_since)
+              .exclude(id__in=ImportDysHistory.objects.filter(file_id__isnull=False).values("file_id"))
+              .order_by("-report_date", "-export_date", "-id").first())
+    cands = [(x.report_date, x.export_date, out(x)) for x, out in ((p_hist, history_out), (p_file, file_out)) if x]
+    production_today = max(cands, key=lambda c: (c[0], c[1]))[2] if cands else None
     return {
         "now": now,
         "worker": {"online": WorkerStatus.is_online(), "last_seen": ws.last_seen if ws else None,
                    "hostname": ws.hostname if ws else "", "current_run_id": ws.current_run_id if ws else None},
         "jobs": [_job_out(j) for j in Job.objects.all()],
         "today_by_oper": today_by_oper,
-        "production_today": file_out(production_today) if production_today else None,
+        "production_today": production_today,      # dạng file_out; source = history (đã vào DYS) | file
         "daily": [{"day": d["day"].isoformat(), "oper": d["oper__code"], "rows": d["rows"]} for d in daily],
         "runs_7d": {r["status"]: r["n"] for r in runs_7d},
         "recent_runs": [_run_out(r) for r in JobRun.objects.select_related("job").order_by("-id")[:8]],
