@@ -213,6 +213,12 @@ def update_setting(request, key: str, data: SettingIn):
             raise HttpError(400, "Giá trị phải là số nguyên không âm")
     if s.value_type == Setting.ValueType.BOOL:
         value = "true" if value.lower() in ("1", "true", "yes", "on") else "false"
+    if key == "dys_api_url" and value:
+        from apps.plans.dys import normalize_url      # import trễ: tránh vòng import core ↔ plans
+        try:
+            value = normalize_url(value)
+        except ValueError as e:
+            raise HttpError(400, str(e))
     s.value = value
     s.save()
     return _setting_out(s)

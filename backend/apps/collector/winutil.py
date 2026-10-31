@@ -50,6 +50,69 @@ def capture_window(hwnd: int, path: Path) -> bool:
     return bool(ok)
 
 
+def focus_in_thread(hwnd: int) -> None:
+    """
+    Đặt focus bàn phím vào `hwnd` BÊN TRONG luồng giao diện của app đó (AttachThreadInput + SetFocus).
+    Không bấm chuột, không đổi cửa sổ đang dùng của người dùng — chỉ đổi control đang nhận phím trong app kia.
+    """
+    import win32process
+    target_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+    me = win32api.GetCurrentThreadId()
+    attached = False
+    try:
+        if target_tid and target_tid != me:
+            win32process.AttachThreadInput(me, target_tid, True)
+            attached = True
+        win32gui.SetFocus(hwnd)
+    except Exception:
+        pass
+    finally:
+        if attached:
+            try:
+                win32process.AttachThreadInput(me, target_tid, False)
+            except Exception:
+                pass
+
+
+def type_into_edit(hwnd: int, text: str, full: bool = False, timeout_ms: int = 3000) -> str:
+    """
+    Điền chữ vào ô Edit SAO CHO app coi như người dùng tự gõ (hộp thoại Save As của Windows bỏ qua WM_SETTEXT
+    khi đang có tên file gợi ý sẵn → vẫn lưu theo tên cũ).
+      full=False: WM_SETTEXT phần đầu + gõ ký tự cuối bằng WM_CHAR (nhanh)
+      full=True : xóa trắng rồi gõ TỪNG ký tự bằng WM_CHAR (chậm hơn, chắc chắn nhất)
+    Trả về nội dung ô sau khi điền.
+    """
+    focus_in_thread(hwnd)
+    if full:
+        win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, "")
+        chars = text
+    else:
+        win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, text[:-1])
+        n = len(text) - 1
+        win32gui.SendMessage(hwnd, win32con.EM_SETSEL, n, n)
+        chars = text[-1:]
+    for ch in chars:
+        win32gui.SendMessageTimeout(hwnd, win32con.WM_CHAR, ord(ch), 1, win32con.SMTO_ABORTIFHUNG, timeout_ms)
+    return get_text(hwnd)
+
+
+def get_text(hwnd: int, timeout_ms: int = 3000) -> str:
+    """
+    Đọc chữ trong control của TIẾN TRÌNH KHÁC bằng WM_GETTEXT.
+    (GetWindowText không gửi WM_GETTEXT sang tiến trình khác → ô Edit của MES luôn đọc ra rỗng.)
+    """
+    send = ctypes.windll.user32.SendMessageTimeoutW
+    send.argtypes = [_wt.HWND, _wt.UINT, _wt.WPARAM, _wt.LPARAM, _wt.UINT, _wt.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    send.restype = _wt.LPARAM
+    res = ctypes.c_size_t(0)
+    if not send(hwnd, win32con.WM_GETTEXTLENGTH, 0, 0, win32con.SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(res)):
+        return ""
+    buf = ctypes.create_unicode_buffer(res.value + 2)
+    send(hwnd, win32con.WM_GETTEXT, res.value + 1, ctypes.cast(buf, ctypes.c_void_p).value or 0,
+         win32con.SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(res))
+    return buf.value
+
+
 def post_keys(hwnd: int, vkeys: list[int]):
     """Gửi phím điều hướng (mũi tên, Home...) thẳng vào control — không dùng bàn phím thật"""
     for vk in vkeys:

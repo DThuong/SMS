@@ -15,11 +15,13 @@ DYS trả 401 giữa chừng (token bị thu hồi, backend khởi động lại
 
 Chỉ dùng thư viện chuẩn (urllib) — không thêm dependency cho máy MES.
 """
+import ipaddress
 import json
 import mimetypes
 import os
 import re
 import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,7 +32,7 @@ from pathlib import Path
 from django.utils import timezone
 
 from apps.collector.errors import AgentError
-from apps.core.models import get_setting
+from apps.core.models import Setting, get_setting
 
 DEFAULT_URL = "https://account.dongyang.site/api"   # backend DYS (đổi trong settings dys_api_url / .env DYS_API_URL)
 
@@ -58,8 +60,84 @@ def importer_name() -> str:
     return f"SMS ({get_setting('dys_username', '') or '?'})"
 
 
+# ---------------- Địa chỉ DYS: chuẩn hóa + tự sửa https → http cho máy chủ nội bộ ----------------
+# Backend DYS nội bộ (vd 172.16.162.123:9000) chạy HTTP thường, KHÔNG có SSL. Gõ nhầm https:// → Python bắt tay TLS,
+# server trả về HTTP thuần → lỗi "[SSL: WRONG_VERSION_NUMBER] wrong version number".
+# Các chuỗi lỗi SSL cho biết đầu bên kia đang nói HTTP thường (OpenSSL 1.1 / 3.x khác nhau):
+_PLAIN_HTTP_SSL_ERRORS = ("wrong_version_number", "wrong version number", "unknown_protocol",
+                          "record layer failure", "packet_length_too_long", "http_request")
+
+# netloc (host:port) đã xác nhận chỉ nhận HTTP — các request sau đi thẳng http://, không thử https nữa
+_plain_http_hosts: set[str] = set()
+
+
+def _is_lan(url: str) -> bool:
+    """Máy chủ trong mạng nội bộ (IP private / loopback / tên máy không có dấu chấm / *.local)"""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".local") or "." not in host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _to_http(url: str) -> str:
+    return "http://" + url.split("://", 1)[1]
+
+
+def normalize_url(raw: str) -> str:
+    """
+    Chuẩn hóa dys_api_url: bỏ khoảng trắng / dấu '/' cuối, thiếu scheme thì tự thêm
+    (IP/máy nội bộ → http://, tên miền công khai → https://), thiếu đường dẫn thì thêm /api.
+    Sai định dạng → ValueError.
+    """
+    url = (raw or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if "://" not in url:
+        url = ("http://" if _is_lan("http://" + url) else "https://") + url
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"Địa chỉ DYS không hợp lệ: {raw!r} — ví dụ https://account.dongyang.site/api "
+                         f"hoặc http://172.16.162.123:9000/api")
+    url = f"{parts.scheme.lower()}://{parts.netloc}{parts.path}".rstrip("/")
+    if not parts.path or parts.path == "/":
+        url += "/api"
+    return url
+
+
+def _plain_http_error(reason) -> bool:
+    text = str(reason).lower()
+    return isinstance(reason, ssl.SSLError) and any(s in text for s in _PLAIN_HTTP_SSL_ERRORS) \
+        or any(s in text for s in ("wrong_version_number", "wrong version number"))
+
+
+def _remember_plain_http(netloc: str) -> None:
+    """Ghi nhớ host chỉ nói HTTP + sửa luôn giá trị dys_api_url trong DB để giao diện DYS hiện đúng"""
+    _plain_http_hosts.add(netloc)
+    try:
+        s = Setting.objects.filter(key="dys_api_url").first()
+        if s and s.value:
+            cur = normalize_url(s.value)
+            if cur.startswith(f"https://{netloc}"):
+                s.value = _to_http(cur)
+                s.save(update_fields=["value"])
+    except Exception:                                    # không để việc ghi DB làm hỏng lần import
+        pass
+
+
 def _cfg() -> dict:
-    url = (get_setting("dys_api_url", "") or os.getenv("DYS_API_URL") or DEFAULT_URL).strip().rstrip("/")
+    raw = get_setting("dys_api_url", "") or os.getenv("DYS_API_URL") or DEFAULT_URL
+    try:
+        url = normalize_url(raw)
+    except ValueError as e:
+        raise DysError(str(e), "DYS_UNREACHABLE")
+    if url.startswith("https://") and urllib.parse.urlsplit(url).netloc in _plain_http_hosts:
+        url = _to_http(url)
     return {"url": url,
             "user": (get_setting("dys_username", "") or os.getenv("DYS_USERNAME", "")).strip(),
             "password": get_setting("dys_password", "") or os.getenv("DYS_PASSWORD", ""),
@@ -121,7 +199,20 @@ def _send_raw(req: urllib.request.Request, timeout: int) -> tuple[int, str]:
         return e.code, e.read().decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         reason = getattr(e, "reason", e)
-        raise DysError(f"Không kết nối được DYS ({req.full_url.split('?')[0]}): {reason}", "DYS_UNREACHABLE")
+        url = req.full_url
+        if url.lower().startswith("https://") and _plain_http_error(reason):
+            netloc = urllib.parse.urlsplit(url).netloc
+            if _is_lan(url):
+                # Máy chủ nội bộ chỉ nói HTTP → gửi lại đúng request đó bằng http:// (cùng body + header)
+                retry = urllib.request.Request(_to_http(url), data=req.data, method=req.get_method(),
+                                               headers=dict(req.header_items()))
+                result = _send_raw(retry, timeout)        # http cũng lỗi → DysError như bình thường
+                _remember_plain_http(netloc)
+                return result
+            raise DysError(f"Máy chủ DYS {netloc} không dùng SSL nhưng 'dys_api_url' đang là https:// "
+                           f"({reason}). Đổi 'dys_api_url' thành http://{netloc}... hoặc dùng "
+                           f"https://account.dongyang.site/api", "DYS_UNREACHABLE")
+        raise DysError(f"Không kết nối được DYS ({url.split('?')[0]}): {reason}", "DYS_UNREACHABLE")
 
 
 def _login(cfg: dict) -> str:
