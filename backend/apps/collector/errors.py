@@ -36,7 +36,13 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_LOGIN_FAILED": ("Không đăng nhập được MES",
                          "Kiểm tra lại 'mes_user_id' / 'mes_password', hoặc đăng nhập MES bằng tay một lần để xem lỗi."),
     "MES_POPUP_BLOCKING": ("Có hộp thoại đang chặn MES",
-                           "Đóng hộp thoại trên MESClient rồi chạy lại. Nội dung hộp thoại có trong thông báo lỗi."),
+                           "Agent đã thử tự đóng 3 lần mà hộp thoại vẫn hiện lại. Xem ảnh chụp, đóng tay trên MESClient "
+                           "rồi chạy lại. Nội dung hộp thoại có trong thông báo lỗi."),
+    "MES_POPUP_ERROR": ("MES báo lỗi giữa chừng (đã tự đóng hộp thoại)",
+                        "Agent đã tự đóng hộp thoại và làm lại bước đó 'mes_step_retries' lần (mặc định 3) mà vẫn lỗi. "
+                        "'Request Reply Timeout' = máy chủ MES chậm/mạng chập chờn → chạy lại sau. "
+                        "'Requested Clipboard operation did not succeed' = app khác đang giữ clipboard (nhật ký ghi tên "
+                        "app) → tắt app đó (phần mềm chép clipboard, TeamViewer/UltraViewer, Remote Desktop...)."),
     "MES_MENU_NOT_FOUND": ("Không tìm thấy menu trên MES",
                            "Tài khoản MES có thể không có quyền vào màn hình này, hoặc tên menu đã đổi."),
     "MES_FORM_NOT_FOUND": ("Không mở được màn hình MES", "Thử mở màn hình bằng tay trên MES để kiểm tra."),

@@ -103,6 +103,11 @@ DEFAULT_SETTINGS = [
      "Thời gian tối đa chờ WPS nhận dữ liệu sau khi bấm nút Excel", False),
     ("mes_auto_dismiss_upgrade", "true", "bool", "Tự đóng hộp thoại nâng cấp",
      "Tự bấm No mỗi khi MES hỏi nâng cấp phiên bản", False),
+    ("mes_step_retries", "3", "int", "Số lần thử lại 1 bước",
+     "MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) → agent tự đóng rồi làm lại ngày/xưởng đó "
+     "tối đa số lần này", False),
+    ("mes_retry_wait_seconds", "5", "int", "Chờ trước khi thử lại (giây)",
+     "Nghỉ giữa 2 lần thử lại 1 bước sau khi tự đóng hộp thoại lỗi", False),
     ("delete_file_after_import", "true", "bool", "Xóa file sau khi import",
      "Import vào DYS thành công thì xóa file trên máy + dòng trong bảng files", False),
     # --- Bước cuối của job: SMS tự đăng nhập DYS và import file vừa lấy (apps/plans/dys.py) ---
@@ -163,3 +168,43 @@ def get_setting(key: str, default=None):
         return Setting.objects.get(key=key).typed_value()
     except Setting.DoesNotExist:
         return default
+
+
+class PopupCloseLog(models.Model):
+    """
+    Bảng `popup_close_logs` — bộ nhớ đóng hộp thoại MES của agent (giữ qua các lần khởi động lại worker).
+    Mỗi lần agent THỬ 1 cách đóng 1 hộp thoại → 1 dòng:
+      not_closed  : bấm/gửi lệnh mà hộp thoại vẫn còn
+      pending     : đã đóng được, đang chờ xem bước quét chạy tiếp có thành công không
+      step_ok     : đã đóng được VÀ bước quét (1 ngày sản lượng / 1 xưởng) chạy tiếp thành công
+      step_failed : đã đóng được nhưng bước quét vẫn lỗi
+    Lần sau gặp hộp thoại cùng nội dung, agent thử trước cách có nhiều step_ok nhất (apps/collector/popup_memory.py).
+    """
+
+    class Result(models.TextChoices):
+        PENDING = "pending", "Đã đóng, chờ kết quả bước"
+        STEP_OK = "step_ok", "Đã đóng + bước chạy tiếp thành công"
+        STEP_FAILED = "step_failed", "Đã đóng nhưng bước vẫn lỗi"
+        NOT_CLOSED = "not_closed", "Không đóng được"
+
+    message = models.CharField("Nội dung hộp thoại", max_length=255)
+    kind = models.CharField("Loại", max_length=20, blank=True, help_text="error / info / no_data / upgrade")
+    method = models.CharField("Cách đóng", max_length=80, help_text="vd: bấm OK, bấm OK (UIA), phím Esc, WM_CLOSE")
+    buttons = models.CharField("Các nút trên hộp thoại", max_length=255, blank=True)
+    result = models.CharField("Kết quả", max_length=20, choices=Result.choices, default=Result.PENDING)
+    step = models.CharField("Bước đang chạy", max_length=150, blank=True)
+    run_id = models.PositiveIntegerField("Lần chạy job", null=True, blank=True)
+    step_error = models.CharField("Lỗi của bước (nếu có)", max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "popup_close_logs"
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["message", "method"], name="popup_msg_method_idx"),
+                   models.Index(fields=["result"], name="popup_result_idx")]
+        verbose_name = "Lịch sử đóng hộp thoại MES"
+        verbose_name_plural = "Lịch sử đóng hộp thoại MES"
+
+    def __str__(self):
+        return f"{self.message[:40]} · {self.method} · {self.result}"

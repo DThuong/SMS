@@ -71,6 +71,8 @@ def mes_config() -> dict:
         "user_id": get_setting("mes_user_id", ""),
         "password": get_setting("mes_password", ""),
         "login_timeout": get_setting("mes_login_timeout_seconds", 60),
+        "step_retries": get_setting("mes_step_retries", 3),
+        "retry_wait": get_setting("mes_retry_wait_seconds", 5),
     }
 
 
@@ -179,6 +181,7 @@ def workorder_plan(run, log):
 
     WorkOrderCollector = _load_collector("workorder")
     collector = WorkOrderCollector(log, mes_config())
+    collector.mes.run_id = run.id
     try:
         collector.open()
     except Exception as e:
@@ -204,6 +207,9 @@ def workorder_plan(run, log):
             errors.append(f"{oper.code} {oper.name}: {e}")
             first_code = first_code or getattr(e, "code", None)
             _screenshot(collector, run, oper.code, log, f"Lỗi khi lấy {oper.name}: {e}")
+            if _blocked(e, log, [o for o in opers[opers.index(oper) + 1:]], errors,
+                        lambda o: f"{o.code} {o.name}"):
+                break
             continue
         # Bước cuối: import vào DYS. Lỗi ở đây là lỗi DYS (không chụp màn hình MES), xưởng này tính là chưa xong
         try:
@@ -214,6 +220,30 @@ def workorder_plan(run, log):
             first_code = first_code or getattr(e, "code", None)
 
     return _result(run, total, errors, len(opers), first_code)
+
+
+def _stop_sequence(log, failed, remaining: list, errors: list[str]):
+    """Sản lượng chạy tuần tự: ngày `failed` chưa thành công → không chạy các ngày sau"""
+    if not remaining:
+        return
+    names = ", ".join(f"{x:%d/%m/%Y}" for x in remaining)
+    log.error("Dừng job: ngày %s chưa thành công nên KHÔNG chạy tiếp %s — chạy lại job từ ngày %s",
+              f"{failed:%d/%m/%Y}", names, f"{failed:%d/%m/%Y}")
+    errors.extend(f"{x:%d/%m/%Y}: chưa chạy (ngày {failed:%d/%m/%Y} chưa thành công)" for x in remaining)
+
+
+def _blocked(e, log, remaining: list, errors: list[str], label) -> bool:
+    """
+    Hộp thoại MES không đóng được (đã thử mọi cách) → DỪNG job, không chạy tiếp các ngày/xưởng còn lại
+    (MES đang bị khóa, chạy tiếp chỉ lỗi lan). Các mục còn lại ghi là "chưa chạy".
+    """
+    if getattr(e, "code", None) != "MES_POPUP_BLOCKING":
+        return False
+    if remaining:
+        names = ", ".join(label(x) for x in remaining)
+        log.error("Dừng job: hộp thoại MES không đóng được → không chạy tiếp %s", names)
+        errors.extend(f"{label(x)}: chưa chạy (MES bị hộp thoại chặn)" for x in remaining)
+    return True
 
 
 def _screenshot(collector, run, tag, log, message=None):
@@ -242,6 +272,9 @@ def production_output(run, log):
     """
     MES → Inquiry → 타임별 실적 조회(TV) → FROM_DATE → View → Excel → lưu file → import vào DYS.
     MES mỗi lần chỉ xem được 1 ngày → params.report_dates nhiều ngày thì lặp lần lượt, mỗi ngày 1 file.
+    CHẠY TUẦN TỰ: ngày trước phải THÀNH CÔNG (lấy MES + import DYS) mới sang ngày sau. Lỗi giữa chừng (hộp thoại...)
+    → collector tự đóng hộp thoại và làm lại ngày đó (mes_step_retries lần); vẫn lỗi → DỪNG job, các ngày sau
+    ghi "chưa chạy" (chạy lại job từ ngày lỗi).
     """
     from apps.collector.errors import AgentError
 
@@ -255,6 +288,7 @@ def production_output(run, log):
 
     ProductionCollector = _load_collector("production")
     collector = ProductionCollector(log, mes_config())
+    collector.mes.run_id = run.id
     try:
         collector.open()
     except Exception as e:
@@ -272,8 +306,8 @@ def production_output(run, log):
             errors.append(f"{d:%d/%m/%Y}: {e}")
             first_code = first_code or getattr(e, "code", None)
             _screenshot(collector, run, f"production_{d:%Y%m%d}", log, f"Lỗi khi lấy sản lượng ngày {d:%d/%m/%Y}: {e}")
-            collector.form = None          # mở lại form ở ngày kế tiếp cho chắc
-            continue
+            _stop_sequence(log, d, dates[i:], errors)
+            break
         # Bước cuối: import vào DYS — ngày này chỉ tính là xong khi DYS nhận thành công
         try:
             _finish_item(report, log, "MES chưa tải xong — tăng mes_view_wait_seconds — hoặc ngày chưa có sản lượng")
@@ -281,6 +315,9 @@ def production_output(run, log):
         except Exception as e:
             errors.append(f"{d:%d/%m/%Y}: import DYS lỗi — {e}")
             first_code = first_code or getattr(e, "code", None)
+            _stop_sequence(log, d, dates[i:], errors)
+            break
+        log.info("Ngày %s THÀNH CÔNG", d.strftime("%d/%m/%Y"))
 
     return _result(run, total, errors, len(dates), first_code)
 

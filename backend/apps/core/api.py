@@ -7,7 +7,7 @@ from django.utils import timezone
 from ninja import Router, Schema
 from ninja.errors import HttpError
 
-from .models import ApiKey, Oper, Plant, Setting, get_setting
+from .models import ApiKey, Oper, Plant, PopupCloseLog, Setting, get_setting
 from .security import create_session, end_session, request_token, session_minutes, verify_key
 from .timeutil import day_end, day_start
 
@@ -222,6 +222,57 @@ def update_setting(request, key: str, data: SettingIn):
     s.value = value
     s.save()
     return _setting_out(s)
+
+
+# ---------------- Bộ nhớ đóng hộp thoại MES ----------------
+@router.get("/popup-memory", tags=["Hộp thoại MES"],
+            summary="Bộ nhớ đóng hộp thoại: mỗi hộp thoại → các cách đã thử, đóng được + chạy tiếp thành công bao nhiêu lần")
+def popup_memory_summary(request):
+    """
+    Gộp theo (nội dung hộp thoại, cách đóng): step_ok = đóng được + bước quét chạy tiếp thành công,
+    step_failed = đóng được nhưng bước vẫn lỗi, not_closed = bấm không đóng được, pending = đang chờ kết quả.
+    `preferred` = cách agent sẽ thử trước lần sau (điểm cao nhất: 2×step_ok − step_failed − 2×not_closed).
+    """
+    from django.db.models import Max, Q
+    rows = (PopupCloseLog.objects.values("message", "method")
+            .annotate(step_ok=Count("id", filter=Q(result=PopupCloseLog.Result.STEP_OK)),
+                      step_failed=Count("id", filter=Q(result=PopupCloseLog.Result.STEP_FAILED)),
+                      not_closed=Count("id", filter=Q(result=PopupCloseLog.Result.NOT_CLOSED)),
+                      pending=Count("id", filter=Q(result=PopupCloseLog.Result.PENDING)),
+                      last_seen=Max("created_at")))
+    out: dict[str, dict] = {}
+    for r in rows:
+        r["score"] = 2 * r["step_ok"] - r["step_failed"] - 2 * r["not_closed"]
+        d = out.setdefault(r["message"], {"message": r["message"], "methods": [], "last_seen": r["last_seen"]})
+        d["methods"].append({k: r[k] for k in ("method", "step_ok", "step_failed", "not_closed", "pending",
+                                                "score", "last_seen")})
+        d["last_seen"] = max(d["last_seen"], r["last_seen"])
+    for d in out.values():
+        d["methods"].sort(key=lambda m: -m["score"])
+        best = d["methods"][0]
+        d["preferred"] = best["method"] if best["step_ok"] else None
+    return sorted(out.values(), key=lambda d: d["last_seen"], reverse=True)
+
+
+@router.get("/popup-logs", tags=["Hộp thoại MES"], summary="Lịch sử từng lần đóng hộp thoại MES (mới nhất trước)")
+def popup_logs(request, run_id: int | None = None, result: str | None = None, limit: int = 100):
+    qs = PopupCloseLog.objects.all()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    if result:
+        qs = qs.filter(result=result)
+    return list(qs.values("id", "created_at", "run_id", "step", "message", "kind", "buttons", "method", "result",
+                          "step_error", "resolved_at")[:max(1, min(limit, 1000))])
+
+
+@router.delete("/popup-memory", tags=["Hộp thoại MES"],
+               summary="Xóa bộ nhớ đóng hộp thoại (tất cả, hoặc 1 nội dung qua ?message=)")
+def popup_memory_clear(request, message: str | None = None):
+    qs = PopupCloseLog.objects.all()
+    if message:
+        qs = qs.filter(message=message)
+    deleted, _ = qs.delete()
+    return {"deleted": deleted}
 
 
 # ---------------- Hạn lưu dữ liệu (job CLEANUP) ----------------

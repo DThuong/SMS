@@ -103,7 +103,11 @@ class ProductionCollector(BaseCollector):
         self.log.info("Đặt FROM_DATE = %s", target)
 
     def collect(self, report_date: date, target: Path) -> tuple[Path, int, datetime]:
-        """target: đường dẫn KHÔNG đuôi, vd .../SanLuong/2026-10-28_080012 → trả (file đã lưu, số dòng, thời điểm)"""
+        """target: đường dẫn KHÔNG đuôi, vd .../SanLuong/2026-10-28_080012 → trả (file đã lưu, số dòng, thời điểm).
+        Hộp thoại lỗi giữa chừng (Request Reply Timeout...) → tự đóng và làm lại cả ngày đó (with_retry)."""
+        return self.with_retry(f"Lấy sản lượng ngày {report_date:%d/%m/%Y}", self._collect_once, report_date, target)
+
+    def _collect_once(self, report_date: date, target: Path) -> tuple[Path, int, datetime]:
         if self.form is None:
             self.open()
         self.set_from_date(report_date)
@@ -113,7 +117,11 @@ class ProductionCollector(BaseCollector):
         busy = self.mes.wait_idle()                       # chờ MES truy vấn xong (luồng giao diện trả lời lại)
         self.log.info("MES tải dữ liệu %.0fs; chờ thêm %ss...", busy, self.cfg["view_wait"])
         self.mes.wait(self.cfg["view_wait"])
+        self.mes.check_popup_errors("tải dữ liệu (View)")      # vd Request Reply Timeout → làm lại ngày này
 
+        busy_by = winutil.wait_clipboard_free(10)
+        if busy_by:
+            self.log.warning("Clipboard đang bị %s giữ — vẫn bấm Excel", busy_by)
         before = self.mes.dialogs()
         export_dt = datetime.now().replace(microsecond=0)
         self.mes.click(self.form, "btnExcel")
@@ -121,6 +129,7 @@ class ProductionCollector(BaseCollector):
         self.log.info("MES mở hộp thoại lưu file")
         path = self.mes.save_via_dialog(dlg, target, timeout=self.cfg["export_timeout"])
         self.mes.wait(2)   # đóng thông báo "xuất xong" nếu MES hiện
+        self.mes.take_popup_errors()   # file đã lưu xong → hộp thoại lỗi sau đó không ảnh hưởng dữ liệu
         rows = count_data_rows(path)
         self.log.info("File %s có %d dòng dữ liệu", path.name, rows)
         return path, rows, export_dt

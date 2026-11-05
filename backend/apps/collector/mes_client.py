@@ -17,7 +17,7 @@ import win32gui
 from pywinauto import Desktop
 from pywinauto.findwindows import ElementNotFoundError
 
-from . import winutil
+from . import popup_memory, winutil
 from .errors import MesError
 
 MAIN_TITLE_RE = r".*MESClient.*"
@@ -37,6 +37,16 @@ YES_BUTTON_TEXTS = ("yes", "&yes", "예", "예(&y)", "có")
 # Nút đóng hộp thoại an toàn (KHÔNG BAO GIỜ bấm Yes / ghi đè): id chuẩn IDNO = 7, IDCANCEL = 2
 SAFE_BUTTON_IDS = (7, 2)
 SAFE_BUTTON_TEXTS = ("no", "&no", "cancel", "아니요", "아니요(&n)", "취소", "không", "hủy")
+# Hộp thoại MES báo LỖI (đã tự đóng) → bước đang chạy phải làm lại. Có các chữ này thì KHÔNG coi là thông báo "xong"
+ERROR_WORDS = ("error", "fail", "exception", "timeout", "time out", "timed out", "not succeed", "clipboard",
+               "network", "connection", "server", "socket", "denied", "invalid", "lỗi", "thất bại",
+               "오류", "실패", "에러", "시간 초과", "연결")
+# Nút đóng hộp thoại MES lạ, thứ tự ưu tiên: câu trả lời "phủ định" trước (No/Cancel), rồi Close/OK
+CLOSE_BUTTON_ORDER = ("no", "아니요", "không", "cancel", "취소", "hủy", "close", "닫기", "đóng", "ok", "확인",
+                      "continue", "retry", "다시 시도")
+# KHÔNG BAO GIỜ bấm các nút này ở hộp thoại lạ (có thể xóa / lưu / ghi đè / tắt MES)
+DANGER_BUTTON_WORDS = ("yes", "예", "có", "delete", "삭제", "xóa", "quit", "exit", "종료", "save", "저장", "lưu",
+                       "apply", "적용", "abort")
 TMP_PREFIX = ".dang_luu_"      # thư mục tạm (rỗng) để hộp thoại Save As lưu vào, lưu xong chuyển file ra ngoài
 
 
@@ -123,6 +133,11 @@ class MesClient:
         self.exe_found = ""          # đường dẫn MESClient.exe thật của tiến trình đang chạy
         self._confirmed = {}         # ô mã đã chọn + xác nhận trong phiên: {"Plant": (mã yêu cầu, ô mã, ô mô tả)}
         self.no_data_message = ""    # MES báo "không có dữ liệu" (handle_popup ghi lại, collector đọc rồi xóa)
+        self.popup_errors: list[str] = []   # hộp thoại LỖI đã tự đóng, bước đang chạy chưa xử lý (check_popup_errors)
+        # Bộ nhớ đóng hộp thoại (DB popup_close_logs): hộp thoại đã đóng, chờ biết bước quét chạy tiếp có thành công
+        self.pending_popups: list[tuple] = []      # [(id dòng, nội dung, cách)]
+        self.step = ""                              # bước đang chạy (ghi vào bộ nhớ) — BaseCollector.with_retry đặt
+        self.run_id = None                          # lần chạy job — jobs đặt
 
     # ================= Kết nối / tự mở =================
     def _attach(self, timeout: float) -> bool:
@@ -224,54 +239,224 @@ class MesClient:
                 pass
         return closed
 
+    @staticmethod
+    def _box_message(box) -> str:
+        texts = []
+        try:
+            for c in box.descendants(control_type="Text"):
+                t = c.window_text().strip()
+                if t:
+                    texts.append(t)
+        except Exception:
+            pass
+        if not texts:
+            try:
+                t = box.window_text().strip()
+                if t and t.lower() not in ("messagebox", "frmmessagebox"):
+                    texts.append(t)
+            except Exception:
+                pass
+        return " | ".join(dict.fromkeys(texts)).replace("\r", " ").replace("\n", " ")
+
+    @staticmethod
+    def _box_buttons(box) -> list[tuple]:
+        """
+        [(nút, chữ thường bỏ '&', AutomationId, hwnd)] — CHỈ nút thật của hộp thoại (có hwnd, nằm trong hộp thoại).
+        Bỏ nút thanh tiêu đề (Close/Minimize/Maximize của UIA, không có hwnd → BM_CLICK vào hwnd 0 = không làm gì).
+        """
+        res = []
+        try:
+            box_h = box.handle
+        except Exception:
+            box_h = 0
+        try:
+            for b in box.descendants(control_type="Button"):
+                try:
+                    h = b.handle or 0
+                except Exception:
+                    h = 0
+                if not h or not win32gui.IsWindow(h) or not win32gui.IsWindowVisible(h):
+                    continue
+                if box_h and not win32gui.IsChild(box_h, h):
+                    continue
+                res.append((b, b.window_text().strip().lower().replace("&", ""), b.element_info.automation_id or "", h))
+        except Exception:
+            pass
+        return res
+
+    @staticmethod
+    def _is_danger(text: str) -> bool:
+        return any(w == text or text.startswith(w + "(") or text.startswith(w + " ") for w in DANGER_BUTTON_WORDS)
+
+    def _ordered_buttons(self, buttons: list[tuple], kind: str) -> list[tuple]:
+        """Thứ tự thử các nút: OK → No → Cancel → Close...; không bao giờ có nút nguy hiểm (Yes/Delete/Save/Quit...)"""
+        # Cố định cho MỌI hộp thoại: OK → No → Cancel → Close → Continue/Retry (bấm option có sẵn trên hộp thoại
+        # để đóng, không bao giờ Yes/Delete/Save/Quit). Hộp thoại nâng cấp không có OK → tự rơi xuống No.
+        order = ("ok", "확인", "no", "아니요", "không", "cancel", "취소", "hủy", "close", "닫기", "đóng",
+                 "continue", "retry", "다시 시도")
+        if kind in ("no_data", "info"):
+            order += ("yes", "예")          # thông báo "xong"/"không có dữ liệu" chỉ có Yes → bấm được
+        picked, used = [], set()
+        for want in order:
+            for item in buttons:
+                b, text, aid, h = item
+                if h in used or (self._is_danger(text) and not (kind in ("no_data", "info") and text in ("yes", "예"))):
+                    continue
+                if text == want or text.startswith(want + "(") or (not text and aid.lower().endswith(want)):
+                    picked.append(item)
+                    used.add(h)
+        rest = [it for it in buttons if it[3] not in used and not self._is_danger(it[1])]
+        if len(buttons) == 1 and rest:      # chỉ 1 nút, không nguy hiểm → thử luôn
+            picked += rest
+        return picked
+
+    @staticmethod
+    def _gone(h: int, timeout: float = 1.5) -> bool:
+        """Hộp thoại đã đóng (hoặc ẩn) chưa — kiểm tra liên tục tới timeout"""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if not h or not win32gui.IsWindow(h) or not win32gui.IsWindowVisible(h):
+                    return True
+            except Exception:
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.15)
+
+    def _close_box(self, box, kind: str, msg: str) -> str | None:
+        """
+        Đóng 1 hộp thoại MES: thử LẦN LƯỢT từng cách, mỗi cách chờ ~1.5s xem hộp thoại tắt chưa;
+        chưa tắt → chuyển NGAY sang cách khác (không bấm lại nút cũ).
+        Thứ tự: nút trên hộp thoại (OK → No → Cancel → Close...) trước, rồi Enter → Esc → lệnh đóng cửa sổ.
+        Trong mỗi nhóm, cách nào bộ nhớ ghi "đóng được + bước chạy tiếp thành công" nhiều nhất được thử trước;
+        cách từng "không đóng được" / "đóng xong bước vẫn lỗi" bị đẩy xuống sau.
+        Mỗi lần thử được ghi vào bộ nhớ (popup_close_logs). Trả tên cách đã đóng được; None = thử hết vẫn còn.
+        """
+        h = box.handle
+        buttons = self._box_buttons(box)
+        btn_txt = ", ".join(f"{t or '?'}#{a}" for _, t, a, _ in buttons)[:255]
+        button_steps = []                                    # [(tên cách, hàm thực hiện)]
+        for b, text, aid, bh in self._ordered_buttons(buttons, kind):
+            label = b.window_text().strip() or aid or "nút"
+            button_steps.append((f"bấm {label}", lambda bh=bh: winutil.post_click(bh)))
+            button_steps.append((f"bấm {label} (UIA)", lambda b=b: b.invoke()))
+        skip_enter = kind == "error" and any(self._is_danger(t) for _, t, _, _ in buttons)  # Enter có thể = Yes
+        other_steps = ([] if skip_enter else [("phím Enter", lambda: winutil.post_keys(h, [win32con.VK_RETURN]))]) + [
+            ("phím Esc", lambda: winutil.post_keys(h, [win32con.VK_ESCAPE])),
+            ("lệnh đóng cửa sổ", lambda: win32gui.PostMessage(h, win32con.WM_SYSCOMMAND, win32con.SC_CLOSE, 0)),
+            ("WM_CLOSE", lambda: win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)),
+        ]
+        hist = popup_memory.history(msg)
+        score = lambda st: -hist.get(st[0], {}).get("score", 0)          # sort ổn định: hòa điểm giữ thứ tự mặc định
+        steps = sorted(button_steps, key=score) + sorted(other_steps, key=score)
+        best = steps[0][0] if steps else ""
+        if best in hist and hist[best]["ok"]:
+            self.log.info("Bộ nhớ: hộp thoại '%s' → thử '%s' trước (đã %d lần đóng được + bước chạy tiếp thành công)",
+                          msg[:60], best, hist[best]["ok"])
+        tried = []
+        for name, act in steps:
+            try:
+                act()
+            except Exception as e:
+                tried.append(f"{name} (lỗi: {e})")
+                popup_memory.record(msg, kind, name, False, btn_txt, self.step, self.run_id)
+                continue
+            if self._gone(h):
+                rid = popup_memory.record(msg, kind, name, True, btn_txt, self.step, self.run_id)
+                self.pending_popups.append((rid, msg, name))
+                if tried:
+                    self.log.info("Hộp thoại '%s': %s không đóng được → %s đóng được", msg[:60], ", ".join(tried), name)
+                return name
+            tried.append(name)
+            popup_memory.record(msg, kind, name, False, btn_txt, self.step, self.run_id)
+        self.log.error("Không đóng được hộp thoại '%s' sau khi thử: %s. Các nút đọc được: %s", msg[:120],
+                       ", ".join(tried), btn_txt or "không có")
+        return None
+
+    def resolve_popups(self, ok: bool, error: str = "") -> None:
+        """
+        Bước quét vừa xong → ghi vào bộ nhớ: các hộp thoại đã đóng trong bước đó, đóng xong bước có chạy tiếp
+        THÀNH CÔNG không. Cách nào đóng + chạy tiếp được thì lần sau ưu tiên.
+        """
+        if not self.pending_popups:
+            return
+        popup_memory.resolve(self.pending_popups, ok, error)
+        for _, msg, method in self.pending_popups:
+            self.log.info("Ghi nhớ: hộp thoại '%s' đóng bằng '%s' → bước %s", msg[:60], method,
+                          "chạy tiếp THÀNH CÔNG" if ok else "vẫn LỖI (lần sau ưu tiên cách khác nếu có)")
+        self.pending_popups = []
+
     def handle_popup(self) -> int:
         """
-        Gọi thường xuyên: hộp thoại hỏi nâng cấp → bấm No (MES hỏi lại nhiều lần trong lúc dùng);
-        lỗi nội bộ .NET của MES → bấm Continue; thông báo "xong" → OK. Hộp thoại khác → báo lỗi kèm nội dung.
-        Trả về số hộp thoại đã đóng.
+        Gọi thường xuyên — TỰ ĐÓNG MỌI hộp thoại của MES (frmMessageBox), không cần liệt kê trước từng loại:
+          - hỏi nâng cấp phiên bản        → No
+          - "không có dữ liệu"             → OK, ghi no_data_message (collector trả 0 dòng, không phải lỗi)
+          - thông báo "xong"               → OK
+          - MỌI hộp thoại khác (Request Reply Timeout, Requested Clipboard operation did not succeed, lỗi lạ...)
+            → OK → No → Cancel → Close..., KHÔNG bấm Yes/Delete/Save/Quit
+            → ghi vào popup_errors để bước đang chạy biết mà CHẠY LẠI (check_popup_errors)
+          - lỗi nội bộ .NET                → Continue
+        Mỗi hộp thoại: thử từng cách 1 lần (nút → Enter/Esc → lệnh đóng cửa sổ), chuyển cách ngay khi cách trước
+        không tác dụng. Thử hết vẫn còn → MES_POPUP_BLOCKING (dừng job, không chạy tiếp các ngày/xưởng sau).
         """
         closed = self._dismiss_dotnet_error()
-        for _ in range(5):                       # đóng liên tiếp nếu hiện nhiều cái
+        for _ in range(10):                      # đóng liên tiếp nếu hiện nhiều cái
             boxes = self._message_boxes()
             if not boxes:
                 return closed
             box = boxes[0]
-            msg = ""
-            for c in box.descendants(control_type="Text"):
-                if c.window_text().strip():
-                    msg = c.window_text().strip()
-                    break
-            if self.auto_dismiss_upgrade and "upgrade" in msg.lower():
-                no = [b for b in box.descendants(control_type="Button")
-                      if b.element_info.automation_id == "btnYesNoNo" or b.window_text().strip().lower() == "no"]
-                if not no:
-                    raise MesError(f"Hộp thoại nâng cấp không có nút No: {msg}", "MES_POPUP_BLOCKING")
-                winutil.post_click(no[0].handle)
-                time.sleep(0.8)
-                closed += 1
-                self.log.info("Đã đóng hộp thoại hỏi nâng cấp (chọn No)")
-                continue
-            if any(w in msg.lower() for w in NO_DATA_WORDS):
-                ok = [b for b in box.descendants(control_type="Button")
-                      if b.window_text().strip().lower() in ("ok", "yes", "확인", "close")]
-                if ok:
-                    winutil.post_click(ok[0].handle)
-                    time.sleep(0.8)
-                    closed += 1
-                    self.no_data_message = msg[:200]
-                    self.log.info("MES báo không có dữ liệu: %s", msg[:120])
-                    continue
-            if any(w in msg.lower() for w in INFO_WORDS):
-                ok = [b for b in box.descendants(control_type="Button")
-                      if b.window_text().strip().lower() in ("ok", "yes", "확인")]
-                if ok:
-                    winutil.post_click(ok[0].handle)
-                    time.sleep(0.8)
-                    closed += 1
-                    self.log.info("Đã đóng thông báo của MES: %s", msg[:120])
-                    continue
-            raise MesError(f"Có hộp thoại đang chặn MES: {msg or '(không đọc được nội dung)'}", "MES_POPUP_BLOCKING")
+            msg = self._box_message(box)
+            low = msg.lower()
+            is_error = any(w in low for w in ERROR_WORDS)
+            if "upgrade" in low and self.auto_dismiss_upgrade:
+                kind = "upgrade"
+            elif any(w in low for w in NO_DATA_WORDS):
+                kind = "no_data"
+            elif not is_error and any(w in low for w in INFO_WORDS):
+                kind = "info"
+            else:
+                kind = "error"
+            how = self._close_box(box, kind, msg)
+            if how is None:
+                raise MesError(f"Thử mọi cách vẫn không đóng được hộp thoại MES: {msg or '(không đọc được nội dung)'}",
+                               "MES_POPUP_BLOCKING")
+            closed += 1
+            time.sleep(0.3)
+            if kind == "upgrade":
+                self.log.info("Đã đóng hộp thoại hỏi nâng cấp (%s)", how)
+            elif kind == "no_data":
+                self.no_data_message = msg[:200]
+                self.log.info("MES báo không có dữ liệu (%s): %s", how, msg[:120])
+            elif kind == "info":
+                self.log.info("Đã đóng thông báo của MES (%s): %s", how, msg[:120])
+            else:
+                self.popup_errors.append(msg or "(không đọc được nội dung)")
+                extra = ""
+                if "clipboard" in low:
+                    owner = winutil.clipboard_owner()
+                    extra = f" — clipboard đang bị giữ bởi: {owner}" if owner else ""
+                self.log.warning("Đã TỰ ĐÓNG hộp thoại lỗi của MES (%s): %s%s", how, msg[:200], extra)
+        if self._message_boxes():
+            raise MesError("MES mở liên tục hộp thoại, không đóng hết được: "
+                           + " | ".join(dict.fromkeys(self.popup_errors))[:300], "MES_POPUP_BLOCKING")
         return closed
+
+    def take_popup_errors(self) -> list[str]:
+        """Lấy (và xóa) danh sách hộp thoại lỗi đã tự đóng"""
+        errs, self.popup_errors = self.popup_errors, []
+        return errs
+
+    def check_popup_errors(self, step: str):
+        """
+        Đóng hộp thoại đang mở; nếu trong lúc làm bước `step` MES đã hiện hộp thoại LỖI → ném MES_POPUP_ERROR
+        (lỗi tạm thời — collector tự chạy lại bước đó, xem BaseCollector.with_retry).
+        """
+        self.handle_popup()
+        errs = self.take_popup_errors()
+        if errs:
+            raise MesError(f"MES báo lỗi khi {step} (đã tự đóng hộp thoại): {' | '.join(dict.fromkeys(errs))[:300]}",
+                           "MES_POPUP_ERROR")
 
     def wait_idle(self, timeout: float = 300) -> float:
         """
@@ -622,7 +807,7 @@ class MesClient:
             new = self.dialogs() - before
             if new:
                 return Desktop(backend="win32").window(handle=new.pop())
-            self.handle_popup()
+            self.check_popup_errors("chờ hộp thoại lưu file sau khi bấm Excel")
             time.sleep(0.5)
         raise MesError(f"Đã bấm nút Excel nhưng sau {timeout}s không thấy hộp thoại lưu file", "MES_SAVE_DIALOG_NOT_FOUND")
 

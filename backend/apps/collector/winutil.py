@@ -25,6 +25,47 @@ def post_click(hwnd: int):
     win32api.PostMessage(hwnd, win32con.BM_CLICK, 0, 0)
 
 
+def clipboard_owner() -> str:
+    """Tên tiến trình đang MỞ GIỮ clipboard (nguyên nhân lỗi 'Requested Clipboard operation did not succeed'); '' = rảnh"""
+    try:
+        import psutil
+        import win32clipboard
+        import win32process
+        h = win32clipboard.GetOpenClipboardWindow()
+        if not h:
+            return ""
+        _, pid = win32process.GetWindowThreadProcessId(h)
+        try:
+            name = psutil.Process(pid).name()
+        except Exception:
+            name = "?"
+        return f"{name} (pid {pid}, cửa sổ '{win32gui.GetWindowText(h)[:40]}')"
+    except Exception:
+        return ""
+
+
+def wait_clipboard_free(timeout: float = 10.0) -> str:
+    """
+    Chờ clipboard rảnh trước khi bấm Excel (MES chép lưới vào clipboard rồi dán sang WPS).
+    Thử mở + đóng clipboard ngay (không đổi nội dung). Trả '' nếu rảnh, ngược lại tên tiến trình đang giữ.
+    """
+    import time
+    try:
+        import win32clipboard
+    except ImportError:
+        return ""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            win32clipboard.OpenClipboard(0)
+            win32clipboard.CloseClipboard()
+            return ""
+        except Exception:
+            if time.time() >= deadline:
+                return clipboard_owner() or "không rõ"
+            time.sleep(0.5)
+
+
 def set_text(hwnd: int, text: str):
     """Điền chữ vào ô Edit bằng WM_SETTEXT — WinForms vẫn bắn sự kiện TextChanged"""
     win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, text)
