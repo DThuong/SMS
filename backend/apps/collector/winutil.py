@@ -33,6 +33,14 @@ def clipboard_owner() -> str:
         import win32process
         h = win32clipboard.GetOpenClipboardWindow()
         if not h:
+            # Tiến trình mở clipboard với hwnd NULL → Windows không cho biết là ai. Gợi ý: chủ dữ liệu clipboard gần nhất
+            try:
+                o = win32clipboard.GetClipboardOwner()
+                if o:
+                    _, opid = win32process.GetWindowThreadProcessId(o)
+                    return f"không rõ (chủ dữ liệu clipboard gần nhất: {psutil.Process(opid).name()} pid {opid})"
+            except Exception:
+                pass
             return ""
         _, pid = win32process.GetWindowThreadProcessId(h)
         try:
@@ -42,6 +50,23 @@ def clipboard_owner() -> str:
         return f"{name} (pid {pid}, cửa sổ '{win32gui.GetWindowText(h)[:40]}')"
     except Exception:
         return ""
+
+
+CLIPBOARD_SUSPECTS = (
+    "unikey", "evkey", "openkey", "ultraviewer", "teamviewer", "anydesk", "rustdesk", "rdpclip", "zalo", "ditto",
+    "clipboard", "clipmate", "clipx", "1clipboard", "vmtoolsd", "vboxtray", "snipaste", "sharex", "lightshot",
+)
+
+
+def clipboard_suspects() -> str:
+    """Các tiến trình đang chạy thường theo dõi/giữ clipboard (bộ gõ tiếng Việt, phần mềm điều khiển từ xa...)"""
+    try:
+        import psutil
+        names = sorted({p.info["name"] for p in psutil.process_iter(["name"])
+                        if p.info["name"] and any(k in p.info["name"].lower() for k in CLIPBOARD_SUSPECTS)})
+        return ", ".join(names) or "không thấy app nghi vấn quen thuộc"
+    except Exception:
+        return "?"
 
 
 def wait_clipboard_free(timeout: float = 10.0) -> str:

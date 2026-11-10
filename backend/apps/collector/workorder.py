@@ -115,30 +115,36 @@ class WorkOrderCollector(BaseCollector):
             return self._empty(), datetime.now().replace(microsecond=0)
         self.mes.check_popup_errors("tải dữ liệu (View)")      # vd Request Reply Timeout → làm lại xưởng này
 
+        # Dọn WPS còn sót của các lần xuất trước (đóng qua COM, rồi tắt hẳn tiến trình WPS rỗng/treo)
         self.sheets.close_stale(EXPORT_TITLE)
-        busy_by = winutil.wait_clipboard_free(10)               # MES chép lưới qua clipboard rồi dán sang WPS
-        if busy_by:
-            self.log.warning("Clipboard đang bị %s giữ — vẫn bấm Excel", busy_by)
-        before = self.sheets.book_names()
-        clicked_at = datetime.now().replace(microsecond=0) - timedelta(seconds=2)
-        self.mes.click(self.form, "btnExcel")
-        # MES đổ ~800 dòng x 255 cột sang WPS mất ~90s → chờ tối thiểu 240s
-        timeout = max(int(self.cfg["export_timeout"]), MIN_EXPORT_TIMEOUT)
-        self.log.info("Chờ WPS nhận dữ liệu (tối đa %ss)...", timeout)
+        if self.cfg.get("kill_leftover_wps", True):
+            self.sheets.kill_leftover_wps()
+        # MES chép lưới qua clipboard rồi dán sang WPS → clipboard bận lúc bấm Excel = CHẮC CHẮN lỗi.
+        # Tạm dừng app hay chiếm clipboard; bận thì dò + tắt thủ phạm (chỉ app trong clipboard_kill_list)
+        with self.clip.paused():
+            why = self.clip.ensure_free()
+            if why:
+                raise MesError(f"Không bấm Excel: {why}", "CLIPBOARD_BUSY")
+            before = self.sheets.book_names()
+            clicked_at = datetime.now().replace(microsecond=0) - timedelta(seconds=2)
+            self.mes.click(self.form, "btnExcel")
+            # MES đổ ~800 dòng x 255 cột sang WPS mất ~90s → chờ tối thiểu 240s
+            timeout = max(int(self.cfg["export_timeout"]), MIN_EXPORT_TIMEOUT)
+            self.log.info("Chờ WPS nhận dữ liệu (tối đa %ss)...", timeout)
 
-        def tick():
-            self.mes.handle_popup()
-            if self.mes.no_data_message:                  # MES báo không có gì để xuất
-                raise _NoData()
-            # "Requested Clipboard operation did not succeed"... → dừng chờ WPS ngay, làm lại (khỏi chờ đủ 240s)
-            self.mes.check_popup_errors("xuất Excel sang WPS")
+            def tick():
+                self.mes.handle_popup()
+                if self.mes.no_data_message:                  # MES báo không có gì để xuất
+                    raise _NoData()
+                # "Requested Clipboard operation did not succeed"... → dừng chờ WPS ngay, làm lại (khỏi chờ đủ 240s)
+                self.mes.check_popup_errors("xuất Excel sang WPS")
 
-        try:
-            wb, ws, export_dt = self.sheets.wait_for_export(EXPORT_TITLE, clicked_at, timeout, tick, before=before)
-        except _NoData:
-            return self._empty(), datetime.now().replace(microsecond=0)
-        self.sheets.wait_until_stable(ws, tick=lambda: self.mes.check_popup_errors("chờ WPS nhận đủ dữ liệu"),
-                                      timeout=timeout)
+            try:
+                wb, ws, export_dt = self.sheets.wait_for_export(EXPORT_TITLE, clicked_at, timeout, tick, before=before)
+            except _NoData:
+                return self._empty(), datetime.now().replace(microsecond=0)
+            self.sheets.wait_until_stable(ws, tick=lambda: self.mes.check_popup_errors("chờ WPS nhận đủ dữ liệu"),
+                                          timeout=timeout)
         df = self.sheets.read_table(ws)
         self.sheets.close(wb)
         self.log.info("Đọc được %d dòng, %d cột", len(df), len(df.columns))

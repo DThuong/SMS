@@ -434,8 +434,12 @@ class MesClient:
                 self.popup_errors.append(msg or "(không đọc được nội dung)")
                 extra = ""
                 if "clipboard" in low:
-                    owner = winutil.clipboard_owner()
-                    extra = f" — clipboard đang bị giữ bởi: {owner}" if owner else ""
+                    try:
+                        from .clipboard_guard import _fmt, diagnose
+                        extra = f" — {_fmt(diagnose())}"
+                    except Exception:
+                        owner = winutil.clipboard_owner()
+                        extra = f" — clipboard đang bị giữ bởi: {owner}" if owner else ""
                 self.log.warning("Đã TỰ ĐÓNG hộp thoại lỗi của MES (%s): %s%s", how, msg[:200], extra)
         if self._message_boxes():
             raise MesError("MES mở liên tục hộp thoại, không đóng hết được: "

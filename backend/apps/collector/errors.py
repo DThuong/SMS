@@ -38,6 +38,10 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_POPUP_BLOCKING": ("Có hộp thoại đang chặn MES",
                            "Agent đã thử tự đóng 3 lần mà hộp thoại vẫn hiện lại. Xem ảnh chụp, đóng tay trên MESClient "
                            "rồi chạy lại. Nội dung hộp thoại có trong thông báo lỗi."),
+    "CLIPBOARD_BUSY": ("Clipboard Windows đang bị app khác giữ — chưa bấm Excel",
+                       "SMS đã chờ mà clipboard vẫn bận nên không bấm Excel (bấm sẽ chắc chắn lỗi 'Requested Clipboard "
+                       "operation did not succeed'). Nhật ký ghi các app nghi giữ clipboard (UniKey/EVKey, UltraViewer, "
+                       "TeamViewer, AnyDesk, Zalo...) → tắt app đó hoặc tắt tính năng đồng bộ clipboard của nó."),
     "MES_POPUP_ERROR": ("MES báo lỗi giữa chừng (đã tự đóng hộp thoại)",
                         "Agent đã tự đóng hộp thoại và làm lại bước đó 'mes_step_retries' lần (mặc định 3) mà vẫn lỗi. "
                         "'Request Reply Timeout' = máy chủ MES chậm/mạng chập chờn → chạy lại sau. "

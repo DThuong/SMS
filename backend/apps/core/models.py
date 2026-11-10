@@ -108,6 +108,19 @@ DEFAULT_SETTINGS = [
      "tối đa số lần này", False),
     ("mes_retry_wait_seconds", "5", "int", "Chờ trước khi thử lại (giây)",
      "Nghỉ giữa 2 lần thử lại 1 bước sau khi tự đóng hộp thoại lỗi", False),
+    ("clipboard_wait_seconds", "120", "int", "Chờ clipboard rảnh (giây)",
+     "Trước khi bấm Excel (Work Order): clipboard bị app khác giữ thì chờ tối đa số giây này", False),
+    ("clipboard_kill_list", "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe", "str", "App được phép tắt khi giữ clipboard",
+     "Tên file .exe, cách nhau dấu phẩy. Clipboard bận → agent tắt lần lượt các app này (nếu đang chạy) tới khi "
+     "clipboard rảnh; app nào tắt xong mà rảnh = thủ phạm, được ghi nhớ (storage/clipboard_culprits.json)", False),
+    ("clipboard_priority", "true", "bool", "Ưu tiên scan MES hơn app giữ clipboard",
+     "Bật: clipboard bận lúc xuất → agent được tắt BẤT KỲ app nào đang giữ clipboard (trừ hệ thống/MES/worker và "
+     "clipboard_protect_list), job xong tự mở lại. Tắt: chỉ tắt app trong clipboard_kill_list", False),
+    ("clipboard_protect_list", "", "str", "App không bao giờ tắt",
+     "Tên file .exe, cách nhau dấu phẩy — vd phần mềm điều khiển từ xa bạn đang dùng để vào máy MES", False),
+    ("clipboard_pause_list", "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe", "str", "App tạm dừng khi xuất Excel",
+     "Tên file .exe, cách nhau dấu phẩy. Tạm dừng (không tắt) suốt lúc MES xuất Work Order sang WPS rồi cho chạy lại. "
+     "KHÔNG nên thêm bộ gõ (UniKey/EVKey) hay phần mềm điều khiển từ xa", False),
     ("delete_file_after_import", "true", "bool", "Xóa file sau khi import",
      "Import vào DYS thành công thì xóa file trên máy + dòng trong bảng files", False),
     # --- Bước cuối của job: SMS tự đăng nhập DYS và import file vừa lấy (apps/plans/dys.py) ---

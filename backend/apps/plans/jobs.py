@@ -73,6 +73,11 @@ def mes_config() -> dict:
         "login_timeout": get_setting("mes_login_timeout_seconds", 60),
         "step_retries": get_setting("mes_step_retries", 3),
         "retry_wait": get_setting("mes_retry_wait_seconds", 5),
+        "clipboard_wait": get_setting("clipboard_wait_seconds", 120),
+        "clipboard_kill_list": get_setting("clipboard_kill_list", "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe"),
+        "clipboard_priority": get_setting("clipboard_priority", True),
+        "clipboard_protect_list": get_setting("clipboard_protect_list", ""),
+        "clipboard_pause_list": get_setting("clipboard_pause_list", "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe"),
     }
 
 
@@ -188,6 +193,13 @@ def workorder_plan(run, log):
         _screenshot(collector, run, "open", log, f"Không chuẩn bị được MES: {e}")
         raise
 
+    try:
+        return _workorder_opers(run, log, collector, plant, d1, d2, opers)
+    finally:
+        collector.clip.restore_killed()      # job xong → mở lại các app đã bị tắt vì giữ clipboard
+
+
+def _workorder_opers(run, log, collector, plant, d1, d2, opers):
     total, errors, first_code = 0, [], None
     exported = None          # (bảng MES xuất ra, Export Date) — MES trả lẫn nhiều xưởng thì dùng lại, khỏi xuất lại
     for oper in opers:

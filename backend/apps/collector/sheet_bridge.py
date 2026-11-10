@@ -1,4 +1,4 @@
-﻿"""
+"""
 Đọc dữ liệu từ WPS Spreadsheets / Excel qua COM.
 Nút Excel của MESClient KHÔNG lưu file mà mở WPS và ghi dữ liệu vào Workbook mới.
 Ta "gắn" vào chính app đó, đọc bảng, rồi đóng workbook không lưu.
@@ -21,6 +21,8 @@ DATE_FORMATS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"
 from .errors import SheetError
 
 SHEET_PROCESSES = {"et.exe", "wps.exe", "wpsoffice.exe", "excel.exe"}
+# Chỉ tự tắt WPS (MES mở 1 WPS mới mỗi lần xuất) — không bao giờ tắt Excel của người dùng
+WPS_PROCESSES = {"et.exe", "wps.exe", "wpsoffice.exe"}
 
 
 def _sheet_app_running() -> bool:
@@ -118,8 +120,8 @@ class SheetBridge:
         def add(src, wb):
             try:
                 key = wb.FullName
-            except pywintypes.com_error:
-                key = id(wb)
+            except Exception:              # com_error hoặc AttributeError "Item.FullName" (WPS treo / object lạ)
+                return
             if key not in seen:
                 seen.add(key)
                 res.append((src, wb))
@@ -151,12 +153,12 @@ class SheetBridge:
             try:
                 wbs = app.Workbooks
                 n = wbs.Count
-            except pywintypes.com_error:
+            except Exception:
                 continue
             for i in range(1, n + 1):
                 try:
                     add(progid, wbs.Item(i))
-                except pywintypes.com_error:
+                except Exception:
                     pass
         return res
 
@@ -166,14 +168,58 @@ class SheetBridge:
         top = ws.Range("A1:J3").Value or ()
         return [str(c) for row in top for c in row if c not in (None, "")]
 
+    @staticmethod
+    def _is_export_of(wb, title: str) -> bool:
+        """Bảng CHƯA LƯU do MES xuất: tiêu đề nằm ở ô A1..J3 HOẶC ở tên sheet
+        (xuất lỗi giữa chừng → MES đã đặt tên sheet 'View Work Order' nhưng ô vẫn trống)"""
+        if wb.Path:
+            return False
+        t = title.lower()
+        try:
+            if t in str(wb.Worksheets.Item(1).Name).lower():
+                return True
+        except Exception:
+            pass
+        return any(t in x.lower() for x in SheetBridge._top_texts(wb))
+
     def book_names(self) -> set:
         names = set()
         for _, wb in self._books():
             try:
                 names.add(wb.FullName)
-            except pywintypes.com_error:
+            except Exception:
                 pass
         return names
+
+    def kill_leftover_wps(self) -> int:
+        """
+        Tắt hẳn các tiến trình WPS còn sót (mỗi lần MES bấm Excel mở 1 WPS mới; xuất lỗi → WPS rỗng ở lại, chồng chất,
+        có cái treo giữ clipboard → MES báo 'Requested Clipboard operation did not succeed' mãi).
+        An toàn: nếu WPS đang mở file ĐÃ LƯU của người dùng thì KHÔNG tắt, chỉ ghi cảnh báo.
+        """
+        procs = [p for p in psutil.process_iter(["name"]) if (p.info["name"] or "").lower() in WPS_PROCESSES]
+        if not procs:
+            return 0
+        saved = []
+        for _, wb in self._books():
+            try:
+                if wb.Path:
+                    saved.append(wb.FullName)
+            except Exception:
+                pass
+        if saved:
+            self.log.warning("Còn %d tiến trình WPS nhưng đang mở file đã lưu (%s) → không tự tắt; "
+                             "hãy đóng tay các cửa sổ WPS trống", len(procs), ", ".join(saved)[:200])
+            return 0
+        for p in procs:
+            try:
+                p.kill()
+            except psutil.Error:
+                pass
+        psutil.wait_procs(procs, timeout=5)
+        self.log.info("Đã tắt %d tiến trình WPS còn sót từ các lần xuất trước", len(procs))
+        time.sleep(1)
+        return len(procs)
 
     def close_stale(self, title: str) -> int:
         """Đóng (không lưu) các bảng `title` còn sót từ lần chạy trước — tránh nhầm và làm WPS nặng"""
@@ -181,12 +227,12 @@ class SheetBridge:
         for _, wb in self._books():
             try:
                 # Chỉ bảng CHƯA LƯU do MES xuất (Path rỗng) — không đụng file người dùng đang mở
-                if not wb.Path and any(title.lower() in t.lower() for t in self._top_texts(wb)):
+                if self._is_export_of(wb, title):
                     name = wb.Name
                     self.close(wb)
                     n += 1
                     self.log.info("Đóng bảng '%s' còn sót từ lần trước: %s", title, name)
-            except pywintypes.com_error as e:
+            except Exception as e:
                 self.log.info("Không đóng được một workbook cũ (đang bận?): %s", e)
         return n
 
@@ -206,7 +252,7 @@ class SheetBridge:
                 try:
                     name = wb.FullName
                     texts = self._top_texts(wb)
-                except pywintypes.com_error as e:
+                except Exception as e:
                     seen[f"{progid}:?"] = f"đang bận/không đọc được ({e.args[1] if len(e.args) > 1 else e})"
                     continue
                 is_new = before is not None and name not in before

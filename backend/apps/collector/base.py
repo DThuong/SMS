@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from . import winutil
+from .clipboard_guard import ClipboardGuard
 from .errors import AgentError
 from .mes_client import MesClient
 from .sheet_bridge import SheetBridge
@@ -23,11 +24,18 @@ DEFAULT_CONFIG = {
     "login_timeout": 60,
     "step_retries": 3,              # số lần làm 1 bước (1 ngày sản lượng / 1 xưởng) khi gặp lỗi tạm thời
     "retry_wait": 5,                # nghỉ giữa 2 lần thử (giây)
+    "kill_leftover_wps": True,
+    "clipboard_wait": 120,          # chờ clipboard rảnh tối đa (giây) trước khi bấm Excel (Work Order)
+    "clipboard_kill_list": "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe",   # app ĐƯỢC PHÉP tắt khi đang giữ clipboard
+    "clipboard_priority": True,     # ưu tiên scan MES: được tắt mọi app giữ clipboard (job xong tự mở lại)
+    "clipboard_protect_list": "",   # app không bao giờ tắt
+    "clipboard_pause_list": "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe",  # app tạm dừng suốt lúc xuất      # trước khi bấm Excel (Work Order): tắt WPS rỗng còn sót của các lần xuất trước
 }
 
 # Lỗi TẠM THỜI → tự đóng hộp thoại, dọn dẹp rồi làm lại bước đó (không bỏ cả ngày/xưởng ngay lần đầu).
 # KHÔNG có MES_POPUP_BLOCKING: lỗi đó = đã thử mọi cách đóng hộp thoại mà vẫn còn → làm lại cũng vô ích, dừng job.
 RETRYABLE_CODES = {
+    "CLIPBOARD_BUSY",             # clipboard bị app khác giữ quá lâu — chờ rồi làm lại
     "MES_POPUP_ERROR",            # MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) — đã tự đóng
     "MES_BUSY_TIMEOUT",
     "MES_SAVE_DIALOG_NOT_FOUND",
@@ -45,10 +53,12 @@ class BaseCollector:
         self.cfg = {**DEFAULT_CONFIG, **(config or {})}
         self.mes = MesClient(log, self.cfg["auto_dismiss_upgrade"])
         self.sheets = SheetBridge(SPREADSHEET_PROGIDS, log)
+        self.clip = ClipboardGuard(log, self.cfg)
         self.form = None
 
     def prepare(self):
         """Bước chuẩn bị chung — lỗi ở đây có mã lỗi rõ ràng (SHEET_APP_MISSING, MES_NOT_RUNNING, MES_LOGIN_*...)"""
+        self.clip.resume_leftovers()           # worker chết lúc đang tạm dừng app → cho chạy lại
         progid = self.sheets.check_available()
         self.log.info("Máy agent có bảng tính COM: %s", progid)
         self.mes.connect(self.cfg["exe_path"], self.cfg["auto_start"], self.cfg["start_timeout"])
