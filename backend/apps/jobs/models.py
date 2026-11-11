@@ -17,7 +17,10 @@ def cron_period(cron: str, base: datetime | None = None) -> tuple[datetime, date
     Vd cron "0 8 * * *", lúc 15:00 ngày 30 → [30/10 08:00, 31/10 08:00); lúc 03:00 ngày 31 → vẫn kỳ đó.
     """
     base = timezone.localtime(base or timezone.now())
-    start = croniter(cron, base + timedelta(seconds=1)).get_prev(datetime)   # +1s: đúng 08:00:00 tính là kỳ mới
+    # Làm tròn xuống phút: đúng 08:00:xx là kỳ mới. KHÔNG cộng thêm giây (bản cũ +1s → lúc 23:29:59 đã tính kỳ
+    # 23:30 trong TƯƠNG LAI, lần chạy vừa tạo có created_at < start nên không được tính → tạo lặp 8 lần ngày 10/11)
+    floor = base.replace(second=0, microsecond=0)
+    start = floor if croniter.match(cron, floor) else croniter(cron, floor).get_prev(datetime)
     return start, croniter(cron, start).get_next(datetime)
 
 
@@ -49,7 +52,9 @@ class Job(models.Model):
     def scheduled_run_in_period(self, base: datetime | None = None):
         """Lần chạy TỰ ĐỘNG (trigger=schedule) của kỳ hiện tại, hoặc None nếu kỳ này chưa chạy"""
         start, _ = cron_period(self.cron, base)
-        return (self.runs.filter(trigger=JobRun.Trigger.SCHEDULE, created_at__gte=start)
+        # Khớp theo kỳ đã ghi trong params (scheduled_for) HOẶC tạo trong kỳ — chặn tạo trùng dù đồng hồ lệch vài giây
+        return (self.runs.filter(trigger=JobRun.Trigger.SCHEDULE)
+                .filter(models.Q(created_at__gte=start) | models.Q(params__scheduled_for=start.isoformat()))
                 .order_by("id").first())
 
     def save(self, *args, **kwargs):

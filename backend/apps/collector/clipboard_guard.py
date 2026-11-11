@@ -75,6 +75,30 @@ def _save(path: Path, data):
         pass
 
 
+# App "nghe" clipboard: mỗi lần MES chép lưới vào clipboard chúng nhảy vào đọc đúng lúc MES đang ghi → MES lỗi.
+# Ở chế độ ưu tiên scan: tắt TRƯỚC khi bấm Excel (job xong tự mở lại). Không gồm phần mềm điều khiển từ xa.
+PREEMPT = ("unikey", "evkey", "openkey", "ditto", "1clipboard", "clipx", "clipmate", "clipclip", "clipdiary",
+           "snipaste", "sharex", "lightshot")
+
+
+def disable_windows_clipboard_history(log) -> None:
+    """Lịch sử clipboard (Win+V) / đồng bộ clipboard đám mây của Windows cũng đọc clipboard mỗi lần đổi → tắt (HKCU,
+    không cần Admin). Chỉ ghi khi đang bật."""
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Clipboard") as k:
+            for name in ("EnableClipboardHistory", "EnableCloudClipboard"):
+                try:
+                    cur = winreg.QueryValueEx(k, name)[0]
+                except OSError:
+                    cur = None
+                if cur != 0:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, 0)
+                    log.info("Đã tắt %s của Windows (đọc clipboard mỗi lần đổi, tranh với MES)", name)
+    except Exception as e:
+        log.info("Không tắt được lịch sử clipboard Windows: %s", e)
+
+
 def is_free() -> bool:
     return winutil.wait_clipboard_free(0) == ""
 
@@ -154,6 +178,28 @@ class ClipboardGuard:
         if pids:
             _save(PAUSED_FILE, [])
         self.restore_killed()
+        disable_windows_clipboard_history(self.log)
+
+    def preempt(self):
+        """Ưu tiên scan: tắt trước các app nghe clipboard + thủ phạm đã biết (ghi lại để job xong mở lại)"""
+        if not self.priority:
+            return
+        learned = self.learned_names()
+        hit = []
+        for p in psutil.process_iter(["name"]):
+            n = (p.info["name"] or "").lower()
+            if not n or not self._can_kill(n) or n in NO_RESTORE:
+                continue
+            if n in learned or any(k in n for k in PREEMPT):
+                self._record_killed(p)
+                try:
+                    p.kill()
+                    hit.append(p.info["name"])
+                except Exception:
+                    pass
+        if hit:
+            self.log.info("Ưu tiên scan MES: tắt trước app nghe clipboard: %s (job xong tự mở lại)", ", ".join(hit))
+            time.sleep(1)
 
     # ---------- mở lại app đã tắt ----------
     def _can_kill(self, name: str) -> bool:
@@ -276,7 +322,7 @@ class ClipboardGuard:
                 push(p)
         return [p for p in order if self._can_kill(_pname(p.pid))]
 
-    def ensure_free(self) -> str:
+    def ensure_free(self, escalate=None) -> str:
         """'' = clipboard rảnh (sẵn sàng bấm Excel); khác '' = mô tả vì sao vẫn bận sau `wait` giây"""
         deadline = time.time() + self.wait
         t0 = time.time()
@@ -302,11 +348,26 @@ class ClipboardGuard:
                 self.log.warning("THỦ PHẠM giữ clipboard: %s — đã ghi nhớ, lần sau xử lý trước; sẽ tự mở lại khi "
                                  "job xong. Nên tắt hẳn/gỡ app này trên máy MES", name)
                 return ""
-        while time.time() < deadline:            # không có ứng viên được phép tắt → chờ app tự nhả
+        # chờ ngắn cho app tự nhả; vẫn bận → bậc cuối (khởi động lại MESClient — nhật ký 06–11/11: tắt hết app khác
+        # mà clipboard vẫn khóa hàng chục phút, hwnd NULL → MES tự giữ clipboard sau lần xuất lỗi)
+        soft = min(deadline, time.time() + 15) if escalate else deadline
+        while time.time() < soft:
             if is_free():
                 self.log.info("Clipboard đã rảnh sau %.0fs", time.time() - t0)
                 return ""
             time.sleep(1)
+        if escalate:
+            freed = escalate()
+            if freed:
+                self._remember("mesclient.exe", "khởi động lại MES")
+                self.log.warning("THỦ PHẠM giữ clipboard: MESClient.exe (khởi động lại MES là clipboard rảnh)")
+                return ""
+            self.log.warning("Đã khởi động lại MES mà clipboard VẪN bận → thủ phạm là tiến trình hệ thống/worker; %s",
+                             _fmt(diagnose()))
+            while time.time() < deadline:
+                if is_free():
+                    return ""
+                time.sleep(1)
         info = diagnose()
         hint = ("app giữ clipboard không nằm trong danh sách ứng viên (hoặc nằm trong clipboard_protect_list)"
                 if self.priority else "bật clipboard_priority hoặc thêm tên app vào clipboard_kill_list")

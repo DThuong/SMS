@@ -77,6 +77,8 @@ def mes_config() -> dict:
         "clipboard_kill_list": get_setting("clipboard_kill_list", "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe"),
         "clipboard_priority": get_setting("clipboard_priority", True),
         "clipboard_protect_list": get_setting("clipboard_protect_list", ""),
+        "clipboard_restart_mes": get_setting("clipboard_restart_mes", True),
+        "step_retries_workorder": get_setting("mes_step_retries_workorder", 4),
         "clipboard_pause_list": get_setting("clipboard_pause_list", "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe"),
     }
 

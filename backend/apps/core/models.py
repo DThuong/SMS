@@ -116,6 +116,11 @@ DEFAULT_SETTINGS = [
     ("clipboard_priority", "true", "bool", "Ưu tiên scan MES hơn app giữ clipboard",
      "Bật: clipboard bận lúc xuất → agent được tắt BẤT KỲ app nào đang giữ clipboard (trừ hệ thống/MES/worker và "
      "clipboard_protect_list), job xong tự mở lại. Tắt: chỉ tắt app trong clipboard_kill_list", False),
+    ("clipboard_restart_mes", "true", "bool", "Khởi động lại MES khi clipboard bị khóa",
+     "Tắt hết app khác mà clipboard vẫn khóa (MES tự giữ sau lần xuất lỗi) → tắt + mở lại MESClient, tự đăng nhập "
+     "(cần mes_user_id/mes_password) rồi làm lại xưởng đó", False),
+    ("mes_step_retries_workorder", "4", "int", "Số lần thử lại 1 xưởng (Work Order)",
+     "Như mes_step_retries nhưng cho Work Order (1 lần có thể dành cho khởi động lại MES)", False),
     ("clipboard_protect_list", "", "str", "App không bao giờ tắt",
      "Tên file .exe, cách nhau dấu phẩy — vd phần mềm điều khiển từ xa bạn đang dùng để vào máy MES", False),
     ("clipboard_pause_list", "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe", "str", "App tạm dừng khi xuất Excel",

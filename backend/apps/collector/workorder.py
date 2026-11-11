@@ -39,6 +39,13 @@ class _NoData(Exception):
 
 
 class WorkOrderCollector(BaseCollector):
+    def __init__(self, log, config=None):
+        super().__init__(log, config)
+        # Work Order xuất qua clipboard → hay lỗi tạm thời hơn sản lượng; chừa 1 lượt cho khởi động lại MES
+        self.cfg["step_retries"] = max(int(self.cfg.get("step_retries") or 1),
+                                       int(self.cfg.get("step_retries_workorder") or 4))
+        self._mes_restarted = False
+
     def open(self):
         self.prepare()
         self.form = self.mes.open_form(FORM_VIEW_WORK_ORDER, MENU_VIEW_WORK_ORDER)
@@ -122,7 +129,13 @@ class WorkOrderCollector(BaseCollector):
         # MES chép lưới qua clipboard rồi dán sang WPS → clipboard bận lúc bấm Excel = CHẮC CHẮN lỗi.
         # Tạm dừng app hay chiếm clipboard; bận thì dò + tắt thủ phạm (chỉ app trong clipboard_kill_list)
         with self.clip.paused():
-            why = self.clip.ensure_free()
+            self.clip.preempt()
+            self._mes_restarted = False
+            why = self.clip.ensure_free(escalate=self._restart_mes_for_clipboard
+                                        if self.cfg.get("clipboard_restart_mes", True) else None)
+            if self._mes_restarted:
+                # MES mới mở lại: màn hình/điều kiện đã mất → làm lại cả bước (with_retry), clipboard giờ đã rảnh
+                raise MesError("Đã khởi động lại MESClient để nhả clipboard — làm lại xưởng này", "MES_RESTARTED")
             if why:
                 raise MesError(f"Không bấm Excel: {why}", "CLIPBOARD_BUSY")
             before = self.sheets.book_names()
@@ -149,6 +162,30 @@ class WorkOrderCollector(BaseCollector):
         self.sheets.close(wb)
         self.log.info("Đọc được %d dòng, %d cột", len(df), len(df.columns))
         return df, export_dt
+
+    def _restart_mes_for_clipboard(self) -> bool:
+        """Tắt hẳn MESClient (nhả clipboard nó đang giữ) rồi mở lại + tự đăng nhập. True = clipboard rảnh sau khi tắt"""
+        from . import clipboard_guard
+        from .mes_client import _mes_procs
+        procs = _mes_procs()
+        self.log.warning("Clipboard vẫn bị khóa sau khi tắt các app khác → khởi động lại MESClient (%d tiến trình)",
+                         len(procs))
+        for p in procs:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            import psutil
+            psutil.wait_procs(procs, timeout=10)
+        except Exception:
+            pass
+        time.sleep(2)
+        freed = clipboard_guard.is_free()
+        self.log.info("Sau khi tắt MESClient clipboard %s", "RẢNH" if freed else "vẫn bận")
+        self._mes_restarted = True
+        self.form = None                      # lần thử sau: open() → tự mở MES, đăng nhập, mở lại View Work Order
+        return freed
 
     def _empty(self) -> pd.DataFrame:
         self.log.info("MES không có Work Order nào với điều kiện này → lưu file 0 dòng")
