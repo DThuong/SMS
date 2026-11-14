@@ -108,19 +108,17 @@ DEFAULT_SETTINGS = [
      "tối đa số lần này", False),
     ("mes_retry_wait_seconds", "5", "int", "Chờ trước khi thử lại (giây)",
      "Nghỉ giữa 2 lần thử lại 1 bước sau khi tự đóng hộp thoại lỗi", False),
-    ("clipboard_wait_seconds", "120", "int", "Chờ clipboard rảnh (giây)",
-     "Trước khi bấm Excel (Work Order): clipboard bị app khác giữ thì chờ tối đa số giây này", False),
     ("clipboard_kill_list", "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe", "str", "App được phép tắt khi giữ clipboard",
      "Tên file .exe, cách nhau dấu phẩy. Clipboard bận → agent tắt lần lượt các app này (nếu đang chạy) tới khi "
      "clipboard rảnh; app nào tắt xong mà rảnh = thủ phạm, được ghi nhớ (storage/clipboard_culprits.json)", False),
     ("clipboard_priority", "true", "bool", "Ưu tiên scan MES hơn app giữ clipboard",
      "Bật: clipboard bận lúc xuất → agent được tắt BẤT KỲ app nào đang giữ clipboard (trừ hệ thống/MES/worker và "
      "clipboard_protect_list), job xong tự mở lại. Tắt: chỉ tắt app trong clipboard_kill_list", False),
-    ("clipboard_restart_mes", "true", "bool", "Khởi động lại MES khi clipboard bị khóa",
-     "Tắt hết app khác mà clipboard vẫn khóa (MES tự giữ sau lần xuất lỗi) → tắt + mở lại MESClient, tự đăng nhập "
-     "(cần mes_user_id/mes_password) rồi làm lại xưởng đó", False),
+    ("clipboard_max_wait_seconds", "1800", "int", "Chờ clipboard tự nhả tối đa (giây / job)",
+     "Clipboard bị tiến trình không rõ (hwnd NULL) khóa → không tắt được ai thì chờ nó tự nhả rồi mới bấm Excel. "
+     "Tính chung cho cả job (mọi xưởng, mọi lần thử). Đo được: 14 phút (11/11), 20 phút (14/11)", False),
     ("mes_step_retries_workorder", "4", "int", "Số lần thử lại 1 xưởng (Work Order)",
-     "Như mes_step_retries nhưng cho Work Order (1 lần có thể dành cho khởi động lại MES)", False),
+     "Như mes_step_retries nhưng cho Work Order", False),
     ("clipboard_protect_list", "", "str", "App không bao giờ tắt",
      "Tên file .exe, cách nhau dấu phẩy — vd phần mềm điều khiển từ xa bạn đang dùng để vào máy MES", False),
     ("clipboard_pause_list", "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe", "str", "App tạm dừng khi xuất Excel",
@@ -147,7 +145,9 @@ DEFAULT_SETTINGS = [
 ]
 OBSOLETE_SETTINGS = ["dys_production_import_path", "dys_report_date_format", "dys_verify_ssl",
                      "file_retention_days", "workorder_retention_days",   # đã gộp thành data_retention_days
-                     "workorder_period_days_before", "workorder_period_days_after"]   # Period tự động = hôm nay
+                     "workorder_period_days_before", "workorder_period_days_after",   # Period tự động = hôm nay
+                     "clipboard_restart_mes",   # 14/11: khởi động lại MES không nhả clipboard → bỏ hẳn
+                     "clipboard_wait_seconds"]  # 14/11: thay bằng clipboard_max_wait_seconds
 
 
 class ApiKey(models.Model):

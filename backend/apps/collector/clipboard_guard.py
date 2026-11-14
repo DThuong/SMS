@@ -38,7 +38,8 @@ CULPRITS_FILE = STORAGE / "clipboard_culprits.json"
 PAUSED_FILE = STORAGE / "clipboard_paused.json"
 KILLED_FILE = STORAGE / "clipboard_killed.json"
 # Tắt nhưng KHÔNG mở lại (MES tự mở WPS mới mỗi lần xuất)
-NO_RESTORE = {"et.exe", "wps.exe", "wpsoffice.exe", "wpscloudsvr.exe", "wpscenter.exe", "ksolaunch.exe"}
+# msrdc.exe = cửa sổ RDP của WSLg (Docker Desktop/WSL2 đồng bộ clipboard Windows ↔ Linux) — WSLg tự mở lại
+NO_RESTORE = {"et.exe", "wps.exe", "wpsoffice.exe", "wpscloudsvr.exe", "wpscenter.exe", "ksolaunch.exe", "msrdc.exe"}
 
 # Không bao giờ dừng/tắt — hệ thống, MES, chính worker
 NEVER_TOUCH = {"system", "csrss.exe", "winlogon.exe", "explorer.exe", "dwm.exe", "svchost.exe", "services.exe",
@@ -97,6 +98,32 @@ def disable_windows_clipboard_history(log) -> None:
                     log.info("Đã tắt %s của Windows (đọc clipboard mỗi lần đổi, tranh với MES)", name)
     except Exception as e:
         log.info("Không tắt được lịch sử clipboard Windows: %s", e)
+
+
+# Tiến trình hay đọc/ghi clipboard nhưng không tự tắt (hệ thống, Docker/WSL...) — chỉ để ghi nhật ký khi clipboard bận
+INTEGRATORS = ("msrdc", "rdpclip", "wslhost", "wslservice", "vmmem", "docker desktop", "com.docker", "textinputhost",
+               "teamviewer", "ultraviewer", "anydesk", "rustdesk", "zalo", "unikey", "evkey", "openkey", "claude",
+               "vmtoolsd", "vboxtray", "clipboard", "ditto")
+
+
+def clipboard_integrators() -> list[str]:
+    res = []
+    for p in psutil.process_iter(["name"]):
+        n = (p.info["name"] or "")
+        if n and any(k in n.lower() for k in INTEGRATORS):
+            res.append(f"{n} pid {p.pid}")
+    return sorted(res)
+
+
+def _proc_snapshot() -> dict:
+    """{pid: (tên, create_time)} — so 2 ảnh chụp để biết tiến trình nào vừa thoát / vừa chạy"""
+    snap = {}
+    for p in psutil.process_iter(["name", "create_time"]):
+        try:
+            snap[p.pid] = (p.info["name"] or "?", p.info["create_time"] or 0)
+        except Exception:
+            pass
+    return snap
 
 
 def is_free() -> bool:
@@ -162,7 +189,10 @@ class ClipboardGuard:
         v = cfg.get("clipboard_priority", True)
         self.priority = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
         self.pause_list = _names(cfg.get("clipboard_pause_list", ""))
-        self.wait = int(cfg.get("clipboard_wait") or 120)
+        # Tổng thời gian chờ clipboard tự nhả trong 1 job (chia chung các xưởng/lần thử). Lock hwnd NULL đo được
+        # 14 phút (11/11) và 20 phút (14/11) → mặc định 30 phút
+        self.max_wait = int(cfg.get("clipboard_max_wait") or 1800)
+        self._spent = 0.0
         self.probe_after = 5
 
     # ---------- 1. PHÒNG ----------
@@ -322,9 +352,18 @@ class ClipboardGuard:
                 push(p)
         return [p for p in order if self._can_kill(_pname(p.pid))]
 
-    def ensure_free(self, escalate=None) -> str:
-        """'' = clipboard rảnh (sẵn sàng bấm Excel); khác '' = mô tả vì sao vẫn bận sau `wait` giây"""
-        deadline = time.time() + self.wait
+    def ensure_free(self) -> str:
+        """
+        '' = clipboard rảnh (sẵn sàng bấm Excel); khác '' = mô tả vì sao vẫn bận.
+
+        Nhật ký 11/11 và 14/11 (run 174, 186): clipboard bị một tiến trình mở với hwnd NULL giữ liền 14–20 phút rồi
+        TỰ nhả; tắt MESClient (8 lần), WPS, wpscloudsvr, UniKey, Edge đều KHÔNG nhả → không phải MES/WPS, và Windows
+        không cho biết ai đang giữ khi mở với hwnd NULL. Vì vậy:
+          1. tắt các ứng viên như trước (nhanh, đôi khi trúng);
+          2. KHÔNG khởi động lại MES nữa (đã chứng minh vô ích, mỗi lần mất ~3 phút + làm mất màn hình);
+          3. chờ tiếp tới `clipboard_max_wait` giây (mặc định 30 phút, chia chung cho cả job) — lock tự nhả thì bấm Excel;
+          4. lúc clipboard nhả, so ảnh chụp tiến trình → ghi ra tiến trình nào THOÁT / mới chạy đúng lúc đó = thủ phạm.
+        """
         t0 = time.time()
         while time.time() - t0 < self.probe_after:
             if is_free():
@@ -332,6 +371,9 @@ class ClipboardGuard:
             time.sleep(0.5)
         info = diagnose()
         self.log.warning("Clipboard bận — %s", _fmt(info))
+        others = clipboard_integrators()
+        if others:
+            self.log.info("Tiến trình có tích hợp clipboard đang chạy (không phải MES/WPS): %s", ", ".join(others))
         for p in self._candidates(info):
             name = _pname(p.pid)
             self._record_killed(p)
@@ -348,27 +390,59 @@ class ClipboardGuard:
                 self.log.warning("THỦ PHẠM giữ clipboard: %s — đã ghi nhớ, lần sau xử lý trước; sẽ tự mở lại khi "
                                  "job xong. Nên tắt hẳn/gỡ app này trên máy MES", name)
                 return ""
-        # chờ ngắn cho app tự nhả; vẫn bận → bậc cuối (khởi động lại MESClient — nhật ký 06–11/11: tắt hết app khác
-        # mà clipboard vẫn khóa hàng chục phút, hwnd NULL → MES tự giữ clipboard sau lần xuất lỗi)
-        soft = min(deadline, time.time() + 15) if escalate else deadline
-        while time.time() < soft:
+
+        # Chờ lock tự nhả, theo dõi tiến trình để bắt quả tang thủ phạm
+        budget = self.wait_budget()
+        if budget <= 0:
+            return f"clipboard bận, đã hết thời gian chờ của job ({self.max_wait // 60} phút) — {_fmt(diagnose())}"
+        self.log.info("Không xác định được app giữ clipboard → chờ clipboard tự nhả, tối đa %d phút "
+                      "(MES vẫn giữ nguyên màn hình, KHÔNG khởi động lại MES)", max(1, round(budget / 60)))
+        snap, snap_t = _proc_snapshot(), time.time()
+        busy_since = t0
+        w0 = time.time()
+        next_log = w0 + 60
+        while time.time() - w0 < budget:
             if is_free():
+                self._spent += time.time() - w0
                 self.log.info("Clipboard đã rảnh sau %.0fs", time.time() - t0)
+                self._blame_by_timing(snap, snap_t, busy_since)
                 return ""
-            time.sleep(1)
-        if escalate:
-            freed = escalate()
-            if freed:
-                self._remember("mesclient.exe", "khởi động lại MES")
-                self.log.warning("THỦ PHẠM giữ clipboard: MESClient.exe (khởi động lại MES là clipboard rảnh)")
-                return ""
-            self.log.warning("Đã khởi động lại MES mà clipboard VẪN bận → thủ phạm là tiến trình hệ thống/worker; %s",
-                             _fmt(diagnose()))
-            while time.time() < deadline:
-                if is_free():
-                    return ""
-                time.sleep(1)
+            if time.time() >= next_log:
+                self.log.info("Clipboard vẫn bận (%.0f phút) — %s", (time.time() - t0) / 60, _fmt(diagnose()))
+                next_log += 60
+            # ảnh chụp mới nhất TRƯỚC lúc nhả → so khớp chính xác tới ~2s
+            if time.time() - snap_t >= 2:
+                snap, snap_t = _proc_snapshot(), time.time()
+            time.sleep(0.5)
+        self._spent += time.time() - w0
         info = diagnose()
         hint = ("app giữ clipboard không nằm trong danh sách ứng viên (hoặc nằm trong clipboard_protect_list)"
                 if self.priority else "bật clipboard_priority hoặc thêm tên app vào clipboard_kill_list")
-        return f"clipboard bận suốt {self.wait}s — {_fmt(info)}. {hint}"
+        return (f"clipboard bận suốt {time.time() - t0:.0f}s — {_fmt(info)}. {hint}. "
+                f"Tiến trình có tích hợp clipboard: {', '.join(clipboard_integrators()) or '-'}")
+
+    def wait_budget(self) -> float:
+        """Thời gian chờ clipboard tự nhả còn lại của job này (chia chung cho mọi xưởng / mọi lần thử)"""
+        return max(0.0, self.max_wait - self._spent)
+
+    def _blame_by_timing(self, before: dict, before_t: float, busy_since: float):
+        """Clipboard vừa tự nhả → tiến trình nào vừa THOÁT trong ~2s qua là thủ phạm gần như chắc chắn
+        (Windows nhả lock ngay khi luồng giữ nó kết thúc). Không có ai thoát → ghi các tiến trình sinh ra quanh lúc
+        clipboard bắt đầu bị khóa để lần sau đối chiếu."""
+        now = _proc_snapshot()
+        gone = [f"{v[0]} pid {pid}" for pid, v in before.items() if pid not in now or now[pid][1] != v[1]]
+        if gone:
+            self.log.warning("Clipboard nhả ĐÚNG LÚC các tiến trình sau thoát (trong ~%.0fs): %s → nhiều khả năng là "
+                             "thủ phạm; đã ghi vào storage/clipboard_culprits.json mục _timing",
+                             time.time() - before_t, ", ".join(gone))
+        young = [f"{v[0]} pid {pid} (chạy lúc {time.strftime('%H:%M:%S', time.localtime(v[1]))})"
+                 for pid, v in now.items() if busy_since - 600 <= v[1] <= busy_since + 5]
+        if young:
+            self.log.info("Tiến trình khởi động trong 10 phút trước khi clipboard bị khóa: %s", ", ".join(young[:20]))
+        data = _load(CULPRITS_FILE, {})
+        hist = data.get("_timing", [])
+        hist.append({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "locked_for_s": round(time.time() - busy_since),
+                     "exited_on_release": gone, "started_before_lock": young[:20],
+                     "integrators": clipboard_integrators()})
+        data["_timing"] = hist[-30:]
+        _save(CULPRITS_FILE, data)

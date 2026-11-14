@@ -55,18 +55,8 @@ def clipboard_owner() -> str:
 CLIPBOARD_SUSPECTS = (
     "unikey", "evkey", "openkey", "ultraviewer", "teamviewer", "anydesk", "rustdesk", "rdpclip", "zalo", "ditto",
     "clipboard", "clipmate", "clipx", "1clipboard", "vmtoolsd", "vboxtray", "snipaste", "sharex", "lightshot",
+    "msrdc",   # WSLg (Docker Desktop / WSL2) đồng bộ clipboard Windows ↔ Linux qua RDP
 )
-
-
-def clipboard_suspects() -> str:
-    """Các tiến trình đang chạy thường theo dõi/giữ clipboard (bộ gõ tiếng Việt, phần mềm điều khiển từ xa...)"""
-    try:
-        import psutil
-        names = sorted({p.info["name"] for p in psutil.process_iter(["name"])
-                        if p.info["name"] and any(k in p.info["name"].lower() for k in CLIPBOARD_SUSPECTS)})
-        return ", ".join(names) or "không thấy app nghi vấn quen thuộc"
-    except Exception:
-        return "?"
 
 
 def wait_clipboard_free(timeout: float = 10.0) -> str:
@@ -184,12 +174,6 @@ def post_keys(hwnd: int, vkeys: list[int]):
     for vk in vkeys:
         win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
         win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0xC0000001)
-
-
-def post_text(hwnd: int, text: str):
-    """Gõ chữ vào control bằng WM_CHAR — không dùng bàn phím thật"""
-    for ch in text:
-        win32api.PostMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
 
 
 def send_key(hwnd: int, vk: int, char: int | None = None, timeout_ms: int = 5000):

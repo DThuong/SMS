@@ -25,11 +25,10 @@ DEFAULT_CONFIG = {
     "step_retries": 3,              # số lần làm 1 bước (1 ngày sản lượng / 1 xưởng) khi gặp lỗi tạm thời
     "retry_wait": 5,                # nghỉ giữa 2 lần thử (giây)
     "kill_leftover_wps": True,
-    "clipboard_wait": 120,          # chờ clipboard rảnh tối đa (giây) trước khi bấm Excel (Work Order)
     "clipboard_kill_list": "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe",   # app ĐƯỢC PHÉP tắt khi đang giữ clipboard
     "clipboard_priority": True,     # ưu tiên scan MES: được tắt mọi app giữ clipboard (job xong tự mở lại)
     "clipboard_protect_list": "",   # app không bao giờ tắt
-    "clipboard_restart_mes": True,  # tắt hết app khác mà clipboard vẫn khóa → khởi động lại MESClient
+    "clipboard_max_wait": 1800,     # clipboard khóa bởi tiến trình không rõ → chờ tự nhả tối đa (giây, chung cả job)
     "clipboard_pause_list": "ditto.exe,1clipboard.exe,clipx.exe,clipmate.exe,clipclip.exe,clipdiary.exe",  # app tạm dừng suốt lúc xuất      # trước khi bấm Excel (Work Order): tắt WPS rỗng còn sót của các lần xuất trước
 }
 
@@ -37,7 +36,6 @@ DEFAULT_CONFIG = {
 # KHÔNG có MES_POPUP_BLOCKING: lỗi đó = đã thử mọi cách đóng hộp thoại mà vẫn còn → làm lại cũng vô ích, dừng job.
 RETRYABLE_CODES = {
     "CLIPBOARD_BUSY",
-    "MES_RESTARTED",              # vừa khởi động lại MES để nhả clipboard → làm lại bước             # clipboard bị app khác giữ quá lâu — chờ rồi làm lại
     "MES_POPUP_ERROR",            # MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) — đã tự đóng
     "MES_BUSY_TIMEOUT",
     "MES_SAVE_DIALOG_NOT_FOUND",

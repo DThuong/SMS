@@ -41,9 +41,6 @@ SAFE_BUTTON_TEXTS = ("no", "&no", "cancel", "아니요", "아니요(&n)", "취�
 ERROR_WORDS = ("error", "fail", "exception", "timeout", "time out", "timed out", "not succeed", "clipboard",
                "network", "connection", "server", "socket", "denied", "invalid", "lỗi", "thất bại",
                "오류", "실패", "에러", "시간 초과", "연결")
-# Nút đóng hộp thoại MES lạ, thứ tự ưu tiên: câu trả lời "phủ định" trước (No/Cancel), rồi Close/OK
-CLOSE_BUTTON_ORDER = ("no", "아니요", "không", "cancel", "취소", "hủy", "close", "닫기", "đóng", "ok", "확인",
-                      "continue", "retry", "다시 시도")
 # KHÔNG BAO GIỜ bấm các nút này ở hộp thoại lạ (có thể xóa / lưu / ghi đè / tắt MES)
 DANGER_BUTTON_WORDS = ("yes", "예", "có", "delete", "삭제", "xóa", "quit", "exit", "종료", "save", "저장", "lưu",
                        "apply", "적용", "abort")
@@ -498,9 +495,6 @@ class MesClient:
                 except Exception:
                     pass
         return res
-
-    def is_login_screen(self) -> bool:
-        return bool(self._password_edits())
 
     def ensure_logged_in(self, user_id: str, password: str, timeout: int = 60) -> bool:
         """Đang ở màn hình đăng nhập → tự điền User ID + Password, bấm OK. Trả về True nếu vừa đăng nhập."""
@@ -1102,16 +1096,6 @@ class MesClient:
         except ElementNotFoundError:
             raise MesError(f"Không tìm thấy {what} trên màn hình MES", "MES_CONTROL_NOT_FOUND")
 
-    def set_code_view(self, form, cdv_auto_id: str, value: str):
-        """Ô dạng [mã][...][mô tả] của Miracom: điền mã vào txtDisplay"""
-        cdv = form.child_window(auto_id=cdv_auto_id)
-        edit = self._control(cdv, f"ô {cdv_auto_id}", auto_id="txtDisplay")
-        winutil.set_text(edit.handle, value)
-        actual = (edit.get_value() or "").strip()
-        if actual != value:
-            raise MesError(f"Điền {cdv_auto_id}='{value}' thất bại (đang là '{actual}')", "MES_CONTROL_NOT_FOUND")
-        self.log.info("Đặt %s = %s", cdv_auto_id, value)
-
     def click(self, form, auto_id: str):
         self.handle_popup()
         btn = self._control(form, f"nút {auto_id}", auto_id=auto_id)
@@ -1119,15 +1103,6 @@ class MesClient:
             raise MesError(f"Nút {auto_id} đang bị khóa", "MES_CONTROL_NOT_FOUND")
         winutil.post_click(btn.handle)
         self.log.info("Bấm %s", auto_id)
-
-    def click_named(self, form, name: str):
-        """Bấm nút theo chữ hiển thị (khi chưa biết AutomationId)"""
-        self.handle_popup()
-        btn = self._control(form, f"nút '{name}'", title=name, control_type="Button", found_index=0)
-        if not btn.is_enabled():
-            raise MesError(f"Nút '{name}' đang bị khóa", "MES_CONTROL_NOT_FOUND")
-        winutil.post_click(btn.handle)
-        self.log.info("Bấm nút '%s'", name)
 
     # ================= Ô mã [code][...][mô tả] (Plant, Oper...) =================
     def find_code_view(self, form, candidates: list[str], value_re: str | None = None, what: str = ""):
