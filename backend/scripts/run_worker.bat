@@ -9,6 +9,6 @@ call .venv\Scripts\activate.bat
 :loop
 python manage.py run_worker
 echo [%date% %time%] Worker dung (ma loi %errorlevel%), chay lai sau 15 giay>> logs\worker_restart.log
-REM timeout lỗi (Windows đang đăng xuất, không có console) → dùng ping để không lặp chạy lại hàng trăm lần/giây
+REM timeout loi khi Windows dang xuat (khong co console) -> dung ping de van nghi 15 giay
 timeout /t 15 /nobreak >nul 2>&1 || ping -n 16 127.0.0.1 >nul
 goto loop
