@@ -145,7 +145,10 @@ export default function ProductionRunButton({ lang = "vi", username, onImported 
 
       // 2. Theo dõi tới khi xong (token tự gia hạn nếu quá 15 phút)
       while (!r.finished && !cancelled.current) {
-        await sleep(POLL_MS);
+        // Long-poll: server trả NGAY khi có nhật ký mới / đổi trạng thái / job xong (tối đa giữ 25s)
+        const lastSeq = r.logs.length ? r.logs[r.logs.length - 1].seq : 0;
+        await smsJson(getSmsApiKey, `/api/runs/${r.id}/logs?after_seq=${lastSeq}&wait=25&status=${r.status}`)
+          .catch(() => sleep(POLL_MS));   // mạng chập chờn → nghỉ rồi hỏi lại, không bỏ dở
         r = await smsJson<SmsRun>(getSmsApiKey, `/api/runs/${r.id}`);
         setRun(r);
         setPhase(r.status === "queued" ? (r.queue_ahead ? t.queuedAhead(r.queue_ahead) : t.queued) : t.scanning);

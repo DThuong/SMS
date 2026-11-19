@@ -43,3 +43,16 @@ import SmsSessionBadge from "@/components/sms/SmsSessionBadge";
 Hiển thị `Phiên SMS · admint · 12:34`, còn dưới 2 phút chuyển vàng + nút **Gia hạn**; hết hạn / bị thay thế có nút
 tương ứng. Mỗi 60 giây (và khi quay lại tab) hỏi `GET /api/auth/session` để đồng bộ giờ và phát hiện bị thay thế.
 Giờ hết hạn tính theo `expires_at - server_time` nên đúng cả khi đồng hồ máy người dùng chạy lệch.
+
+## Theo dõi lần chạy realtime (nút quay tự tắt khi job xong / lỗi)
+`useSmsRunWatch.ts` → `src/hooks/useSmsRunWatch.ts`. Thay vòng hỏi định kỳ ở trang xem nhật ký job:
+```tsx
+const w = useSmsRunWatch(getSmsApiKey, runId, user.username, () => refetchRunList());
+<Button loading={!w.finished}>…</Button>
+{w.status === "failed" && <Alert>{w.errorInfo?.title}: {w.error}</Alert>}
+{w.logs.map((l) => <LogLine key={l.seq} {...l} />)}
+```
+Dùng `GET /api/runs/{id}/logs?after_seq=&wait=25&status=` (long-poll): server trả ngay khi có dòng mới, trạng thái
+đổi hoặc job xong; mất mạng / phiên SMS hết hạn thì tự thử lại (trước đây vòng hỏi dừng → nút quay kẹt tới khi reload).
+Danh sách lịch sử (`GET /api/runs`) nên gọi lại trong `onFinished` để dòng đó cũng đổi sang Hoàn thành / Lỗi.
+
