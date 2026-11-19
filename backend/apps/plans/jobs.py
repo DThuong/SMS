@@ -201,7 +201,7 @@ def workorder_plan(run, log):
 
 
 def _workorder_opers(run, log, collector, plant, d1, d2, opers):
-    total, errors, first_code = 0, [], None
+    total, errors, first_code, no_data = 0, [], None, []
     exported = None          # (bảng MES xuất ra, Export Date) — MES trả lẫn nhiều xưởng thì dùng lại, khỏi xuất lại
     for oper in opers:
         try:
@@ -212,6 +212,12 @@ def _workorder_opers(run, log, collector, plant, d1, d2, opers):
                 df_all, export_dt = exported = _export_checked(collector, log, plant.code, d1, d2, oper.code)
             df = collector.split_oper(df_all, oper.code)
             others = sorted(collector.opers_in(df_all) - {oper.code})
+            if len(df) == 0:
+                # Không có dữ liệu → dừng xưởng này luôn: không lưu file, không import DYS (không phải lỗi)
+                log.warning("KHÔNG TÌM THẤY DỮ LIỆU Work Order — Oper %s %s, Period %s ~ %s → dừng, không lưu file, "
+                            "không import", oper.code, oper.name, f"{d1:%d/%m/%Y}", f"{d2:%d/%m/%Y}")
+                no_data.append(f"{oper.code} {oper.name}")
+                continue
             log.info("Oper %s %s: %d dòng (bảng xuất có %d dòng%s)", oper.code, oper.name, len(df), len(df_all),
                      f", lẫn xưởng khác: {', '.join(others)}" if others else "")
             ef = save_export(run, plant, oper, df, export_dt, d1, d2)
@@ -232,7 +238,19 @@ def _workorder_opers(run, log, collector, plant, d1, d2, opers):
             errors.append(f"{oper.code} {oper.name}: import DYS lỗi — {e}")
             first_code = first_code or getattr(e, "code", None)
 
+    _log_no_data(log, no_data, len(opers), "xưởng")
     return _result(run, total, errors, len(opers), first_code)
+
+
+def _log_no_data(log, no_data: list[str], n_items: int, what: str):
+    """Tổng kết các mục MES không có dữ liệu (đã dừng ngay, không lưu file / không import)"""
+    if not no_data:
+        return
+    if len(no_data) >= n_items:
+        log.warning("KHÔNG TÌM THẤY DỮ LIỆU trên MES (%s: %s) → job dừng, không có gì để import",
+                    what, ", ".join(no_data))
+    else:
+        log.info("Không có dữ liệu (%s): %s", what, ", ".join(no_data))
 
 
 def _stop_sequence(log, failed, remaining: list, errors: list[str]):
@@ -308,11 +326,22 @@ def production_output(run, log):
         _screenshot(collector, run, "production_open", log, f"Không chuẩn bị được MES: {e}")
         raise
 
-    total, errors, first_code = 0, [], None
+    total, errors, first_code, no_data = 0, [], None, []
     for i, d in enumerate(dates, 1):
         log.info("----- [%d/%d] Ngày %s -----", i, len(dates), d.strftime("%d/%m/%Y"))
         try:
             path, rows, export_dt = collector.collect(d, production_target(d))
+            if rows == 0:
+                # Không có sản lượng → dừng ngày này luôn: xóa file rỗng, không import DYS (không phải lỗi)
+                try:
+                    if path:
+                        path.unlink()
+                except OSError:
+                    pass
+                log.warning("KHÔNG TÌM THẤY DỮ LIỆU sản lượng ngày %s → dừng, không lưu file, không import",
+                            d.strftime("%d/%m/%Y"))
+                no_data.append(d.strftime("%d/%m/%Y"))
+                continue
             report = register_production_file(run, d, path, rows, export_dt)
             log.info("Đã lưu %s (%d dòng dữ liệu)", path.name, report.rows)
         except Exception as e:
@@ -332,6 +361,7 @@ def production_output(run, log):
             break
         log.info("Ngày %s THÀNH CÔNG", d.strftime("%d/%m/%Y"))
 
+    _log_no_data(log, no_data, len(dates), "ngày")
     return _result(run, total, errors, len(dates), first_code)
 
 

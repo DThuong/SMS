@@ -90,6 +90,13 @@ def set_text(hwnd: int, text: str):
 def capture_window(hwnd: int, path: Path) -> bool:
     """Chụp cửa sổ bằng PrintWindow (app tự vẽ vào bộ nhớ, không nháy màn hình) — chỉ dùng khi lỗi"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    img, ok = grab_window(hwnd)
+    img.save(path)
+    return ok
+
+
+def grab_window(hwnd: int):
+    """(ảnh PIL của cửa sổ, PrintWindow thành công?) — không cần cửa sổ nằm trên cùng, không dùng chuột"""
     l, t, r, b = win32gui.GetWindowRect(hwnd)
     w, h = r - l, b - t
     hdc = win32gui.GetWindowDC(hwnd)
@@ -100,11 +107,11 @@ def capture_window(hwnd: int, path: Path) -> bool:
     mem.SelectObject(bmp)
     ok = ctypes.windll.user32.PrintWindow(hwnd, mem.GetSafeHdc(), 2)
     bi = bmp.GetInfo()
-    Image.frombuffer("RGB", (bi["bmWidth"], bi["bmHeight"]), bmp.GetBitmapBits(True),
-                     "raw", "BGRX", 0, 1).save(path)
+    img = Image.frombuffer("RGB", (bi["bmWidth"], bi["bmHeight"]), bmp.GetBitmapBits(True),
+                           "raw", "BGRX", 0, 1).copy()
     win32gui.DeleteObject(bmp.GetHandle())
     mem.DeleteDC(); mfc.DeleteDC(); win32gui.ReleaseDC(hwnd, hdc)
-    return bool(ok)
+    return img, bool(ok)
 
 
 def focus_in_thread(hwnd: int) -> None:

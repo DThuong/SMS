@@ -32,6 +32,7 @@ PLANT_CDV = ["cdvPlant", "cdvFactory", "cdvPlantID", "cdvPlantCode", "cdvFac"]
 OPER_CDV = ["cdvOper"]
 PERIOD_ITEM = "Period"                               # mục cuối của ô chọn kỳ (Curr.D, Prev.D, ..., Period)
 FROM_DATE, TO_DATE = "dtpFromDate", "dtpToDate"
+GRID = "spdData_top"                                 # lưới kết quả (FarPoint — không đọc được ô, chỉ chụp ảnh)
 
 
 class _NoData(Exception):
@@ -133,8 +134,14 @@ class WorkOrderCollector(BaseCollector):
         self.log.info("MES tải dữ liệu %.0fs; chờ thêm %ss cho lưới vẽ xong...", busy, wait)
         self.mes.wait(wait)
         if self.mes.no_data_message:
-            return self._empty(), datetime.now().replace(microsecond=0)
+            return self._empty(f"MES báo: {self.mes.no_data_message}"), datetime.now().replace(microsecond=0)
         self.mes.check_popup_errors("tải dữ liệu (View)")      # vd Request Reply Timeout → làm lại xưởng này
+        # MES không báo gì khi không có Work Order, chỉ để lưới trống (19/11) → chụp lưới; trống 2 lần liền → dừng,
+        # khỏi bấm Excel / chờ clipboard
+        if self.grid_has_rows() is False:
+            self.mes.wait(5)
+            if self.grid_has_rows(save_as=f"nodata_{oper}") is False:
+                return self._empty("lưới MES trống sau khi bấm View"), datetime.now().replace(microsecond=0)
 
         # Dọn WPS còn sót của các lần xuất trước (đóng qua COM, rồi tắt hẳn tiến trình WPS rỗng/treo)
         self.sheets.close_stale(EXPORT_TITLE)
@@ -166,7 +173,7 @@ class WorkOrderCollector(BaseCollector):
             try:
                 wb, ws, export_dt = self.sheets.wait_for_export(EXPORT_TITLE, clicked_at, timeout, tick, before=before)
             except _NoData:
-                return self._empty(), datetime.now().replace(microsecond=0)
+                return self._empty(f"MES báo: {self.mes.no_data_message}"), datetime.now().replace(microsecond=0)
             self.sheets.wait_until_stable(ws, tick=lambda: self.mes.check_popup_errors("chờ WPS nhận đủ dữ liệu"),
                                           timeout=timeout)
         df = self.sheets.read_table(ws)
@@ -174,9 +181,47 @@ class WorkOrderCollector(BaseCollector):
         self.log.info("Đọc được %d dòng, %d cột", len(df), len(df.columns))
         return df, export_dt
 
-    def _empty(self) -> pd.DataFrame:
-        self.log.info("MES không có Work Order nào với điều kiện này → lưu file 0 dòng")
+    def _empty(self, why: str) -> pd.DataFrame:
+        self.log.info("Không có Work Order với điều kiện này (%s) → không bấm Excel", why)
         return pd.DataFrame(columns=["Factory", "Work Order", "Oper"])
+
+    def grid_has_rows(self, save_as: str = "") -> bool | None:
+        """
+        Lưới kết quả có dòng dữ liệu không — chụp lưới (PrintWindow) rồi đếm điểm ảnh tối (chữ) ở vùng ngay dưới
+        dòng tiêu đề. Lưới trống = nền xanh nhạt, không có chữ. None = không chụp được → coi như có, cứ bấm Excel.
+        save_as: lưu ảnh vào storage/screenshots để đối chiếu khi kết luận "trống".
+        """
+        import ctypes
+
+        from PIL import ImageStat
+
+        try:
+            h = self.mes._control(self.form, "lưới Work Order", auto_id=GRID).handle
+            img, ok = winutil.grab_window(h)
+            if not ok:
+                return None
+            scale = (ctypes.windll.user32.GetDpiForWindow(h) or 96) / 96
+            w, ht = img.size
+            box = (int(40 * scale), int(48 * scale), w - int(25 * scale), min(ht - int(25 * scale), int(170 * scale)))
+            if box[2] - box[0] < 50 or box[3] - box[1] < 20:
+                return None
+            gray = img.convert("L")
+            if ImageStat.Stat(gray).mean[0] < 40:          # ảnh đen = PrintWindow không vẽ được
+                return None
+            region = gray.crop(box)
+            dark = sum(region.histogram()[:110])
+            has = dark > max(30, region.width * region.height // 2000)
+            self.log.info("Lưới sau View: %d điểm chữ ở vùng dòng đầu → %s", dark, "CÓ dữ liệu" if has else "TRỐNG")
+            if not has and save_as:
+                from .clipboard_guard import STORAGE
+                p = STORAGE / "screenshots" / f"{save_as}_{datetime.now():%Y%m%d_%H%M%S}.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                img.save(p)
+                self.log.info("Ảnh lưới trống: %s", p.name)
+            return has
+        except Exception as e:
+            self.log.info("Không chụp được lưới để kiểm tra dữ liệu (%s) → vẫn bấm Excel", e)
+            return None
 
     @staticmethod
     def split_oper(df: pd.DataFrame, code: str) -> pd.DataFrame:

@@ -107,16 +107,20 @@ class ProductionCollector(BaseCollector):
         Hộp thoại lỗi giữa chừng (Request Reply Timeout...) → tự đóng và làm lại cả ngày đó (with_retry)."""
         return self.with_retry(f"Lấy sản lượng ngày {report_date:%d/%m/%Y}", self._collect_once, report_date, target)
 
-    def _collect_once(self, report_date: date, target: Path) -> tuple[Path, int, datetime]:
+    def _collect_once(self, report_date: date, target: Path) -> tuple[Path | None, int, datetime]:
         if self.form is None:
             self.open()
         self.set_from_date(report_date)
 
+        self.mes.no_data_message = ""
         self.mes.click(self.form, "btnView")
         time.sleep(1)
         busy = self.mes.wait_idle()                       # chờ MES truy vấn xong (luồng giao diện trả lời lại)
         self.log.info("MES tải dữ liệu %.0fs; chờ thêm %ss...", busy, self.cfg["view_wait"])
         self.mes.wait(self.cfg["view_wait"])
+        if self.mes.no_data_message:            # MES báo không có dữ liệu → khỏi bấm Excel
+            self.log.info("MES báo không có dữ liệu ngày %s: %s", f"{report_date:%d/%m/%Y}", self.mes.no_data_message)
+            return None, 0, datetime.now().replace(microsecond=0)
         self.mes.check_popup_errors("tải dữ liệu (View)")      # vd Request Reply Timeout → làm lại ngày này
 
         busy_by = winutil.wait_clipboard_free(10)
