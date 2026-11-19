@@ -55,6 +55,7 @@ def clipboard_owner() -> str:
 CLIPBOARD_SUSPECTS = (
     "unikey", "evkey", "openkey", "ultraviewer", "teamviewer", "anydesk", "rustdesk", "rdpclip", "zalo", "ditto",
     "clipboard", "clipmate", "clipx", "1clipboard", "vmtoolsd", "vboxtray", "snipaste", "sharex", "lightshot",
+    "phoneexperiencehost",   # Phone Link: chia sẻ clipboard với điện thoại
     "msrdc",   # WSLg (Docker Desktop / WSL2) đồng bộ clipboard Windows ↔ Linux qua RDP
 )
 

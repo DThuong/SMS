@@ -6,7 +6,8 @@ API: job (bảng jobs), lần chạy (job_runs), nhật ký (job_logs)
   POST /api/jobs/{code}/run                    chạy ngay (DYS bấm nút) — có thể giữ kết nối chờ xong
   GET  /api/runs                               lịch sử chạy
   GET  /api/runs/{id}                          chi tiết 1 lần chạy: trạng thái, lỗi, nhật ký, file tạo ra
-  GET  /api/runs/{id}/logs?after_seq=          chỉ lấy nhật ký mới (cập nhật trực tiếp)
+  GET  /api/runs/{id}/logs?after_seq=&wait=25  nhật ký mới + trạng thái; wait>0 = giữ kết nối tới khi có dòng mới
+                                               hoặc job xong (realtime, xem dys-integration/useSmsRunWatch.ts)
   GET  /api/runs/{id}/logs/{seq}/screenshot    ảnh màn hình MES lúc lỗi
 
 Luồng sản lượng cho DYS:
@@ -296,12 +297,27 @@ def get_run(request, run_id: int):
     return _run_detail(get_object_or_404(JobRun, id=run_id))
 
 
-@router.get("/runs/{run_id}/logs", summary="Nhật ký mới của lần chạy (after_seq)")
-def get_run_logs(request, run_id: int, after_seq: int = 0):
-    """Gọi định kỳ với after_seq = seq lớn nhất đã có để chỉ lấy dòng nhật ký mới"""
-    r = get_object_or_404(JobRun, id=run_id)
-    return {"status": r.status, "finished": r.status in FINAL, "queue_ahead": queue_ahead(r),
-            "logs": [_log_out(r, lg) for lg in r.logs.filter(seq__gt=after_seq).order_by("seq")]}
+LONG_POLL_MAX = 25      # giây — dưới giới hạn 100s của Cloudflare và 120s của gunicorn
+
+
+@router.get("/runs/{run_id}/logs", summary="Nhật ký mới + trạng thái lần chạy (after_seq, wait = long-poll)")
+def get_run_logs(request, run_id: int, after_seq: int = 0, wait: int = 0, status: str = ""):
+    """
+    after_seq = seq lớn nhất frontend đã có → chỉ trả dòng mới.
+    wait (0–25 giây): CHỜ trên server tới khi có dòng nhật ký mới, trạng thái khác `status` frontend đang hiển thị,
+    hoặc job xong → trả ngay (gần như realtime, không cần WebSocket); hết `wait` mà không có gì thì trả rỗng,
+    frontend gọi lại ngay. Phản hồi luôn kèm trạng thái mới nhất (status, finished, error, error_info, rows_total).
+    """
+    import time
+
+    deadline = time.monotonic() + max(0, min(wait, LONG_POLL_MAX))
+    while True:
+        r = get_object_or_404(JobRun.objects.select_related("job"), id=run_id)
+        logs = list(r.logs.filter(seq__gt=after_seq).order_by("seq"))
+        if logs or r.status in FINAL or (status and r.status != status) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    return {**_run_out(r), "logs": [_log_out(r, lg) for lg in logs]}
 
 
 @router.get("/runs/{run_id}/logs/{seq}/screenshot", summary="Ảnh màn hình lúc lỗi")

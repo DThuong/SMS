@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
 # KHÔNG có MES_POPUP_BLOCKING: lỗi đó = đã thử mọi cách đóng hộp thoại mà vẫn còn → làm lại cũng vô ích, dừng job.
 RETRYABLE_CODES = {
     "CLIPBOARD_BUSY",
+    "MES_SESSION_LOST",           # "Session Not Connected": phiên MES rớt → tắt + mở lại MES, đăng nhập lại
     "MES_POPUP_ERROR",            # MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) — đã tự đóng
     "MES_BUSY_TIMEOUT",
     "MES_SAVE_DIALOG_NOT_FOUND",
@@ -44,6 +45,24 @@ RETRYABLE_CODES = {
     "SHEET_DATA_UNSTABLE",
     "MES_DATA_MISMATCH",
 }
+
+
+# Phiên MES với máy chủ đã rớt (19/11: sau 30 phút chờ clipboard) → mọi thao tác sau đều lỗi "Object reference..."
+# và hộp thoại có khi không đóng được → chỉ có cách tắt hẳn MES, mở lại, đăng nhập lại
+SESSION_LOST_WORDS = ("session not connected",)
+# MES gọi COM Excel.Application ({00024500-...}) để xuất; WPS mất đăng ký "tương thích MS Office" → 80040154.
+# Làm lại vô ích → báo lỗi ngay kèm cách sửa
+EXCEL_NOT_REGISTERED_WORDS = ("80040154", "class not registered")
+
+
+def classify(e: Exception) -> str | None:
+    """Mã lỗi thật của e (ưu tiên nội dung hộp thoại MES hơn mã chung MES_POPUP_ERROR/MES_POPUP_BLOCKING)"""
+    msg = str(e).lower()
+    if any(w in msg for w in EXCEL_NOT_REGISTERED_WORDS):
+        return "EXCEL_COM_NOT_REGISTERED"
+    if any(w in msg for w in SESSION_LOST_WORDS):
+        return "MES_SESSION_LOST"
+    return getattr(e, "code", None)
 
 
 class BaseCollector:
@@ -56,7 +75,7 @@ class BaseCollector:
         self.clip = ClipboardGuard(log, self.cfg)
         self.form = None
 
-    def prepare(self):
+    def prepare(self, _restarted: bool = False):
         """Bước chuẩn bị chung — lỗi ở đây có mã lỗi rõ ràng (SHEET_APP_MISSING, MES_NOT_RUNNING, MES_LOGIN_*...)"""
         self.clip.resume_leftovers()           # worker chết lúc đang tạm dừng app → cho chạy lại
         progid = self.sheets.check_available()
@@ -71,6 +90,9 @@ class BaseCollector:
         left = self.mes.take_popup_errors()    # hộp thoại lỗi còn sót từ trước (đã đóng) — không phải lỗi của lần này
         if left:
             self.log.info("Đã đóng %d hộp thoại lỗi còn sót trên MES trước khi chạy", len(left))
+            if not _restarted and any(w in " ".join(left).lower() for w in SESSION_LOST_WORDS):
+                self.restart_mes("còn hộp thoại 'Session Not Connected' từ lần trước")
+                return self.prepare(_restarted=True)
 
     def recover(self, why: str = ""):
         """Dọn MES về trạng thái sạch trước khi làm lại 1 bước: đóng mọi hộp thoại MES + hộp thoại Windows còn sót"""
@@ -100,7 +122,12 @@ class BaseCollector:
             try:
                 result = fn(*args, **kwargs)
             except Exception as e:
-                code = getattr(e, "code", None)
+                code = classify(e)
+                if code == "EXCEL_COM_NOT_REGISTERED":
+                    self.mes.resolve_popups(False, str(e))
+                    raise AgentError(f"{e} — WPS mất đăng ký tương thích Excel, làm lại vô ích", code) from e
+                if code == "MES_SESSION_LOST" and isinstance(e, AgentError):
+                    e.code = code
                 if not isinstance(e, AgentError) or code not in RETRYABLE_CODES or i >= attempts:
                     self.mes.resolve_popups(False, str(e))      # hết lượt → đóng xong mà bước KHÔNG chạy tiếp được
                     if not isinstance(e, AgentError):
@@ -110,11 +137,32 @@ class BaseCollector:
                     raise
                 self.log.warning("%s lỗi lần %d/%d [%s]: %s → đóng hộp thoại, chờ %ss rồi làm lại",
                                  what, i, attempts, code, e, int(wait))
-                self.recover(f"chạy lại {what}")
+                if code == "MES_SESSION_LOST":
+                    self.restart_mes("MES báo 'Session Not Connected'")
+                else:
+                    self.recover(f"chạy lại {what}")
                 time.sleep(wait)
             else:
                 self.mes.resolve_popups(True)
                 return result
+
+    def restart_mes(self, why: str):
+        """Tắt hẳn MESClient; lần thao tác sau open() tự mở lại MES, đăng nhập, mở lại màn hình"""
+        from .mes_client import _mes_procs
+        procs = _mes_procs()
+        self.log.warning("%s → tắt MESClient (%d tiến trình), mở lại + đăng nhập lại", why, len(procs))
+        for p in procs:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            import psutil
+            psutil.wait_procs(procs, timeout=10)
+        except Exception:
+            pass
+        time.sleep(2)
+        self.form = None
 
     def _remember_exe_path(self):
         """Cấu hình mes_exe_path sai/khác với MESClient đang chạy → lưu đường dẫn thật để lần sau tự mở được"""

@@ -47,6 +47,14 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
                         "'Request Reply Timeout' = máy chủ MES chậm/mạng chập chờn → chạy lại sau. "
                         "'Requested Clipboard operation did not succeed' = app khác đang giữ clipboard (nhật ký ghi tên "
                         "app) → tắt app đó (phần mềm chép clipboard, TeamViewer/UltraViewer, Remote Desktop...)."),
+    "MES_SESSION_LOST": ("Phiên MES rớt kết nối (Session Not Connected)",
+                         "Agent đã tự tắt + mở lại MESClient và đăng nhập lại mà vẫn lỗi → kiểm tra mạng máy MES / "
+                         "máy chủ MES, thử đăng nhập MES bằng tay."),
+    "EXCEL_COM_NOT_REGISTERED": ("MES không gọi được Excel (Class not registered 80040154)",
+                                 "Nút Excel của MES cần Excel.Application; WPS chỉ cung cấp khi bật chế độ tương thích "
+                                 "MS Office (thường bị tắt sau khi WPS tự cập nhật). Mở 'WPS Office → Công cụ cấu hình "
+                                 "(Configuration Tools) → Nâng cao → Cài đặt tương thích', tích 'WPS Spreadsheets' tương "
+                                 "thích Microsoft Excel → OK, rồi chạy lại job."),
     "MES_MENU_NOT_FOUND": ("Không tìm thấy menu trên MES",
                            "Tài khoản MES có thể không có quyền vào màn hình này, hoặc tên menu đã đổi."),
     "MES_FORM_NOT_FOUND": ("Không mở được màn hình MES", "Thử mở màn hình bằng tay trên MES để kiểm tra."),

@@ -47,6 +47,21 @@ class WorkOrderCollector(BaseCollector):
 
     def open(self):
         self.prepare()
+        from .sheet_bridge import excel_com_server
+        srv = excel_com_server()
+        if srv == "":
+            self.log.warning("Excel.Application CHƯA được đăng ký (WPS tắt chế độ tương thích MS Office) → nút Excel "
+                             "của MES sẽ lỗi 'Class not registered'. Bật lại trong WPS Configuration Tools")
+        elif srv:
+            import re
+            from pathlib import Path
+            m = re.match(r'\s*"([^"]+)"|\s*(\S+)', srv)
+            exe = (m.group(1) or m.group(2)) if m else ""
+            if exe and not Path(exe).exists():
+                self.log.warning("Excel.Application trỏ tới file không còn tồn tại (%s) — WPS đã cập nhật lên bản mới? "
+                                 "→ chạy lại script đăng ký Excel.Application (docs/tien-do/2026-11-19.md)", exe)
+            else:
+                self.log.info("Excel.Application → %s", srv)
         self.form = self.mes.open_form(FORM_VIEW_WORK_ORDER, MENU_VIEW_WORK_ORDER)
         self.log.info("Period đang hiện trên MES: %s", self.mes.read_period(self.form))
 

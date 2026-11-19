@@ -39,7 +39,8 @@ PAUSED_FILE = STORAGE / "clipboard_paused.json"
 KILLED_FILE = STORAGE / "clipboard_killed.json"
 # Tắt nhưng KHÔNG mở lại (MES tự mở WPS mới mỗi lần xuất)
 # msrdc.exe = cửa sổ RDP của WSLg (Docker Desktop/WSL2 đồng bộ clipboard Windows ↔ Linux) — WSLg tự mở lại
-NO_RESTORE = {"et.exe", "wps.exe", "wpsoffice.exe", "wpscloudsvr.exe", "wpscenter.exe", "ksolaunch.exe", "msrdc.exe"}
+NO_RESTORE = {"et.exe", "wps.exe", "wpsoffice.exe", "wpscloudsvr.exe", "wpscenter.exe", "ksolaunch.exe", "msrdc.exe",
+              "phoneexperiencehost.exe"}   # Phone Link (đồng bộ clipboard với điện thoại) — Windows tự mở lại
 
 # Không bao giờ dừng/tắt — hệ thống, MES, chính worker
 NEVER_TOUCH = {"system", "csrss.exe", "winlogon.exe", "explorer.exe", "dwm.exe", "svchost.exe", "services.exe",
@@ -78,7 +79,7 @@ def _save(path: Path, data):
 
 # App "nghe" clipboard: mỗi lần MES chép lưới vào clipboard chúng nhảy vào đọc đúng lúc MES đang ghi → MES lỗi.
 # Ở chế độ ưu tiên scan: tắt TRƯỚC khi bấm Excel (job xong tự mở lại). Không gồm phần mềm điều khiển từ xa.
-PREEMPT = ("unikey", "evkey", "openkey", "ditto", "1clipboard", "clipx", "clipmate", "clipclip", "clipdiary",
+PREEMPT = ("unikey", "evkey", "openkey", "phoneexperiencehost", "ditto", "1clipboard", "clipx", "clipmate", "clipclip", "clipdiary",
            "snipaste", "sharex", "lightshot")
 
 
@@ -124,6 +125,22 @@ def _proc_snapshot() -> dict:
         except Exception:
             pass
     return snap
+
+
+def _services_by_pid() -> dict:
+    """{pid: ' [dịch vụ,...]'} cho svchost — biết svchost nào là Clipboard User Service (cbdhsvc)..."""
+    res = {}
+    try:
+        for s in psutil.win_service_iter():
+            try:
+                pid = s.pid()
+                if pid:
+                    res.setdefault(pid, []).append(s.name())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {pid: f" [{','.join(sorted(n))[:80]}]" for pid, n in res.items()}
 
 
 def is_free() -> bool:
@@ -435,7 +452,8 @@ class ClipboardGuard:
             self.log.warning("Clipboard nhả ĐÚNG LÚC các tiến trình sau thoát (trong ~%.0fs): %s → nhiều khả năng là "
                              "thủ phạm; đã ghi vào storage/clipboard_culprits.json mục _timing",
                              time.time() - before_t, ", ".join(gone))
-        young = [f"{v[0]} pid {pid} (chạy lúc {time.strftime('%H:%M:%S', time.localtime(v[1]))})"
+        svc = _services_by_pid()
+        young = [f"{v[0]}{svc.get(pid, '')} pid {pid} (chạy lúc {time.strftime('%H:%M:%S', time.localtime(v[1]))})"
                  for pid, v in now.items() if busy_since - 600 <= v[1] <= busy_since + 5]
         if young:
             self.log.info("Tiến trình khởi động trong 10 phút trước khi clipboard bị khóa: %s", ", ".join(young[:20]))

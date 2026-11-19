@@ -59,6 +59,9 @@ def execute(run: JobRun) -> JobRun:
     log = _make_logger(run)
     log.info("Bắt đầu job %s (%s)", run.job.name, run.get_trigger_display())
 
+    # Dòng nhật ký cuối được ghi SAU khi lưu trạng thái cuối: frontend thấy dòng "Hoàn thành"/"Job thất bại" thì
+    # trạng thái trong cùng phản hồi chắc chắn đã là success/partial/failed (trước đây lệch → kẹt nút "đang chạy")
+    final_msg = None
     try:
         if handler is None:
             raise RuntimeError(f"Chưa có handler cho job '{run.job.code}' trong registry.py")
@@ -68,20 +71,23 @@ def execute(run: JobRun) -> JobRun:
         if errors:
             run.status = JobRun.Status.PARTIAL
             run.error = "\n".join(errors)
-            log.warning("Hoàn thành một phần: %d lỗi", len(errors))
+            final_msg = (logging.WARNING, "Hoàn thành một phần: %d lỗi", (len(errors),), False)
         else:
             run.status = JobRun.Status.SUCCESS
-            log.info("Hoàn thành: %d dòng", run.rows_total)
+            final_msg = (logging.INFO, "Hoàn thành: %d dòng", (run.rows_total,), False)
     except Exception as e:
         run.status = JobRun.Status.FAILED
         run.error = str(e)
         run.error_code = getattr(e, "code", None) or "UNKNOWN"
-        log.exception("Job thất bại [%s]: %s", run.error_code, e)
+        final_msg = (logging.ERROR, "Job thất bại [%s]: %s", (run.error_code, e), True)
     finally:
         run.finished_at = timezone.now()
         run.save(update_fields=["status", "rows_total", "error", "error_code", "finished_at"])
         run.job.last_run_at = run.finished_at
         run.job.save(update_fields=["last_run_at"])
+        if final_msg:
+            level, msg, args, exc = final_msg
+            log.log(level, msg, *args, exc_info=exc)
         for h in list(log.handlers):
             h.close()
             log.removeHandler(h)

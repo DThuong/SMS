@@ -352,3 +352,24 @@ class SheetBridge:
             self.log.warning("App COM gắn được: %s", [p for p, _ in self._apps()])
         except Exception as e:
             self.log.warning("Không đọc được ROT: %s", e)
+
+
+EXCEL_CLSID = "{00024500-0000-0000-C000-000000000046}"   # Excel.Application — nút Excel của MES tạo đối tượng này
+
+
+def excel_com_server() -> str:
+    """Chương trình đăng ký cho Excel.Application ở góc nhìn 32-bit (MESClient là app 32-bit); '' = CHƯA đăng ký
+    (MES sẽ báo 'Class not registered 80040154'); None = không kiểm tra được"""
+    try:
+        import winreg
+        for sub in ("LocalServer32", "InprocServer32"):
+            try:
+                with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"CLSID\{EXCEL_CLSID}\{sub}", 0,
+                                    winreg.KEY_READ | winreg.KEY_WOW64_32KEY) as k:
+                    return str(winreg.QueryValueEx(k, "")[0] or sub)
+            except FileNotFoundError:
+                continue
+        return ""
+    except Exception:
+        return None
+
