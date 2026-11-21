@@ -96,7 +96,7 @@ class Command(BaseCommand):
         import win32com.client
 
         from apps.collector import winutil
-        from apps.collector.base import SPREADSHEET_PROGIDS
+        SPREADSHEET_PROGIDS = ("Ket.Application", "Excel.Application")
 
         pythoncom.CoInitialize()
 

@@ -50,6 +50,12 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_SESSION_LOST": ("Phiên MES rớt kết nối (Session Not Connected)",
                          "Agent đã tự tắt + mở lại MESClient và đăng nhập lại mà vẫn lỗi → kiểm tra mạng máy MES / "
                          "máy chủ MES, thử đăng nhập MES bằng tay."),
+    "MES_GRID_COPY_EMPTY": ("Không chép được lưới Work Order",
+                            "Agent bấm chọn lưới + Ctrl+C nhưng clipboard trống. Máy MES phải MỞ KHÓA màn hình, cửa sổ MES "
+                            "không bị che, không ai dùng chuột/bàn phím lúc job Work Order chạy (~vài giây/xưởng)."),
+    "MES_GRID_COPY_FAILED": ("Chép lưới được nhưng không có tiêu đề cột",
+                             "Lưới MES chép ra không kèm dòng tiêu đề (Factory, Work Order...). Gửi người phát triển "
+                             "nội dung lỗi (2 dòng đầu chép được) để chỉnh cách đọc."),
     "EXCEL_COM_NOT_REGISTERED": ("MES không gọi được Excel (Class not registered 80040154)",
                                  "Nút Excel của MES cần Excel.Application; WPS chỉ cung cấp khi bật chế độ tương thích "
                                  "MS Office (thường bị tắt sau khi WPS tự cập nhật). Mở 'WPS Office → Công cụ cấu hình "

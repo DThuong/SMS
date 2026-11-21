@@ -5,17 +5,18 @@ Luồng (đúng như thao tác tay):
   → Plant: chọn mã (vd PL20 TV BOARD PLANT) qua ô Plant / nút "..."
   → Period: ô chọn kiểu kỳ = "Period" → đặt từ ngày ~ đến ngày (ô ngày hiển thị MM/DD/YYYY)
   → Oper: chọn mã (2010 SMD, 3010 MAIN...) qua ô Oper / nút "..."
-  → View → Excel (MES đổ dữ liệu sang WPS) → đọc bảng qua COM → đóng workbook không lưu → trả DataFrame
+  → View → bấm ô góc lưới (chọn hết) → Ctrl+C → đọc clipboard → DataFrame (grid_copy.py; không dùng nút Excel/WPS)
 Sau khi đọc vẫn lọc lại theo cột Oper cho chắc (phòng khi MES trả lẫn xưởng khác).
 """
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
 
 from . import winutil
 from .base import BaseCollector
 from .errors import MesError
+from .grid_copy import copy_grid, parse_grid_text
 
 MENU_VIEW_WORK_ORDER = [
     "[PM]Production Management",
@@ -24,8 +25,6 @@ MENU_VIEW_WORK_ORDER = [
     "View Work Order",
 ]
 FORM_VIEW_WORK_ORDER = "frmCWIPViewWorkOrderList"   # AutomationId của form
-EXPORT_TITLE = "View Work Order"                     # tiêu đề ô A1 trong bảng xuất
-MIN_EXPORT_TIMEOUT = 240                             # giây chờ WPS nhận dữ liệu (xuất cả nhà máy ~90s)
 
 # AutomationId các ô điều kiện. Ô Plant chưa khảo sát → thử lần lượt, không thấy thì dò ô cdv* đang chứa "PL.."
 PLANT_CDV = ["cdvPlant", "cdvFactory", "cdvPlantID", "cdvPlantCode", "cdvFac"]
@@ -35,34 +34,15 @@ FROM_DATE, TO_DATE = "dtpFromDate", "dtpToDate"
 GRID = "spdData_top"                                 # lưới kết quả (FarPoint — không đọc được ô, chỉ chụp ảnh)
 
 
-class _NoData(Exception):
-    """MES báo không có dữ liệu trong lúc chờ xuất Excel"""
-
-
 class WorkOrderCollector(BaseCollector):
     def __init__(self, log, config=None):
         super().__init__(log, config)
-        # Work Order xuất qua clipboard → hay lỗi tạm thời hơn sản lượng
+        # Work Order chép lưới qua clipboard → hay lỗi tạm thời hơn sản lượng
         self.cfg["step_retries"] = max(int(self.cfg.get("step_retries") or 1),
                                        int(self.cfg.get("step_retries_workorder") or 4))
 
     def open(self):
         self.prepare()
-        from .sheet_bridge import excel_com_server
-        srv = excel_com_server()
-        if srv == "":
-            self.log.warning("Excel.Application CHƯA được đăng ký (WPS tắt chế độ tương thích MS Office) → nút Excel "
-                             "của MES sẽ lỗi 'Class not registered'. Bật lại trong WPS Configuration Tools")
-        elif srv:
-            import re
-            from pathlib import Path
-            m = re.match(r'\s*"([^"]+)"|\s*(\S+)', srv)
-            exe = (m.group(1) or m.group(2)) if m else ""
-            if exe and not Path(exe).exists():
-                self.log.warning("Excel.Application trỏ tới file không còn tồn tại (%s) — WPS đã cập nhật lên bản mới? "
-                                 "→ chạy lại script đăng ký Excel.Application (docs/tien-do/2026-11-19.md)", exe)
-            else:
-                self.log.info("Excel.Application → %s", srv)
         self.form = self.mes.open_form(FORM_VIEW_WORK_ORDER, MENU_VIEW_WORK_ORDER)
         self.log.info("Period đang hiện trên MES: %s", self.mes.read_period(self.form))
 
@@ -112,15 +92,15 @@ class WorkOrderCollector(BaseCollector):
     # ---------- xuất ----------
     def export(self, plant: str, date_from: date, date_to: date, oper: str,
                view_wait: float | None = None) -> tuple[pd.DataFrame, datetime]:
-        """Như _export_once; hộp thoại lỗi giữa chừng (Clipboard, Request Reply Timeout...) → tự đóng, làm lại (with_retry)"""
+        """Như _export_once; lỗi tạm thời (hộp thoại MES, chép lưới rỗng...) → tự đóng, làm lại (with_retry)"""
         return self.with_retry(f"Xuất Work Order Oper {oper}", self._export_once, plant, date_from, date_to, oper,
                                view_wait=view_wait)
 
     def _export_once(self, plant: str, date_from: date, date_to: date, oper: str,
                      view_wait: float | None = None) -> tuple[pd.DataFrame, datetime]:
         """
-        Đặt điều kiện → View → (chờ MES tải xong) → Excel → đọc TOÀN BỘ bảng MES xuất ra (chưa lọc lại theo Oper).
-        MES báo "không có dữ liệu" → trả bảng rỗng (0 dòng), không phải lỗi.
+        Đặt điều kiện → View → (chờ MES tải xong) → chép TOÀN BỘ lưới (chưa lọc lại theo Oper).
+        Lưới trống / MES báo "không có dữ liệu" → trả bảng rỗng (0 dòng), không phải lỗi.
         """
         self.log.info("----- Xuất Work Order: Plant %s · %s ~ %s · Oper %s -----",
                       plant, f"{date_from:%d/%m/%Y}", f"{date_to:%d/%m/%Y}", oper)
@@ -136,59 +116,35 @@ class WorkOrderCollector(BaseCollector):
         if self.mes.no_data_message:
             return self._empty(f"MES báo: {self.mes.no_data_message}"), datetime.now().replace(microsecond=0)
         self.mes.check_popup_errors("tải dữ liệu (View)")      # vd Request Reply Timeout → làm lại xưởng này
-        # MES không báo gì khi không có Work Order, chỉ để lưới trống (19/11) → chụp lưới; trống 2 lần liền → dừng,
-        # khỏi bấm Excel / chờ clipboard
+        # MES không báo gì khi không có Work Order, chỉ để lưới trống (19/11) → chụp lưới; trống 2 lần liền → dừng
         if self.grid_has_rows() is False:
             self.mes.wait(5)
             if self.grid_has_rows(save_as=f"nodata_{oper}") is False:
                 return self._empty("lưới MES trống sau khi bấm View"), datetime.now().replace(microsecond=0)
 
-        # Dọn WPS còn sót của các lần xuất trước (đóng qua COM, rồi tắt hẳn tiến trình WPS rỗng/treo)
-        self.sheets.close_stale(EXPORT_TITLE)
-        if self.cfg.get("kill_leftover_wps", True):
-            self.sheets.kill_leftover_wps()
-        # MES chép lưới qua clipboard rồi dán sang WPS → clipboard bận lúc bấm Excel = CHẮC CHẮN lỗi.
-        # Tạm dừng app hay chiếm clipboard; bận thì dò + tắt thủ phạm (chỉ app trong clipboard_kill_list)
+        # Chép lưới như thao tác tay: chọn hết → Ctrl+C → đọc clipboard → DataFrame.
+        # KHÔNG dùng nút Excel → WPS nữa (21/11: Class not registered / Server execution failed liên tục)
         with self.clip.paused():
             self.clip.preempt()
-            # KHÔNG khởi động lại MES khi clipboard khóa (run 186: tắt MES 8 lần, clipboard vẫn khóa ~20 phút rồi tự
-            # nhả) → giữ nguyên màn hình MES, chờ clipboard tự nhả (tối đa clipboard_max_wait cho cả job)
-            why = self.clip.ensure_free()
+            why = self.clip.ensure_free()       # clipboard bị khóa thì Ctrl+C cũng hỏng → chờ như trước
             if why:
-                raise MesError(f"Không bấm Excel: {why}", "CLIPBOARD_BUSY")
-            before = self.sheets.book_names()
-            clicked_at = datetime.now().replace(microsecond=0) - timedelta(seconds=2)
-            self.mes.click(self.form, "btnExcel")
-            # MES đổ ~800 dòng x 255 cột sang WPS mất ~90s → chờ tối thiểu 240s
-            timeout = max(int(self.cfg["export_timeout"]), MIN_EXPORT_TIMEOUT)
-            self.log.info("Chờ WPS nhận dữ liệu (tối đa %ss)...", timeout)
-
-            def tick():
-                self.mes.handle_popup()
-                if self.mes.no_data_message:                  # MES báo không có gì để xuất
-                    raise _NoData()
-                # "Requested Clipboard operation did not succeed"... → dừng chờ WPS ngay, làm lại (khỏi chờ đủ 240s)
-                self.mes.check_popup_errors("xuất Excel sang WPS")
-
-            try:
-                wb, ws, export_dt = self.sheets.wait_for_export(EXPORT_TITLE, clicked_at, timeout, tick, before=before)
-            except _NoData:
-                return self._empty(f"MES báo: {self.mes.no_data_message}"), datetime.now().replace(microsecond=0)
-            self.sheets.wait_until_stable(ws, tick=lambda: self.mes.check_popup_errors("chờ WPS nhận đủ dữ liệu"),
-                                          timeout=timeout)
-        df = self.sheets.read_table(ws)
-        self.sheets.close(wb)
-        self.log.info("Đọc được %d dòng, %d cột", len(df), len(df.columns))
+                raise MesError(f"Không chép được lưới: {why}", "CLIPBOARD_BUSY")
+            export_dt = datetime.now().replace(microsecond=0)
+            grid = self.mes._control(self.form, "lưới Work Order", auto_id=GRID)
+            text = copy_grid(grid.handle, self.mes.hwnd, self.log)
+        self.mes.check_popup_errors("chép lưới (Ctrl+C)")
+        df = parse_grid_text(text)
+        self.log.info("Đọc được %d dòng, %d cột từ lưới MES", len(df), len(df.columns))
         return df, export_dt
 
     def _empty(self, why: str) -> pd.DataFrame:
-        self.log.info("Không có Work Order với điều kiện này (%s) → không bấm Excel", why)
+        self.log.info("Không có Work Order với điều kiện này (%s) → không chép lưới", why)
         return pd.DataFrame(columns=["Factory", "Work Order", "Oper"])
 
     def grid_has_rows(self, save_as: str = "") -> bool | None:
         """
         Lưới kết quả có dòng dữ liệu không — chụp lưới (PrintWindow) rồi đếm điểm ảnh tối (chữ) ở vùng ngay dưới
-        dòng tiêu đề. Lưới trống = nền xanh nhạt, không có chữ. None = không chụp được → coi như có, cứ bấm Excel.
+        dòng tiêu đề. Lưới trống = nền xanh nhạt, không có chữ. None = không chụp được → coi như có, cứ chép lưới.
         save_as: lưu ảnh vào storage/screenshots để đối chiếu khi kết luận "trống".
         """
         import ctypes
@@ -220,7 +176,7 @@ class WorkOrderCollector(BaseCollector):
                 self.log.info("Ảnh lưới trống: %s", p.name)
             return has
         except Exception as e:
-            self.log.info("Không chụp được lưới để kiểm tra dữ liệu (%s) → vẫn bấm Excel", e)
+            self.log.info("Không chụp được lưới để kiểm tra dữ liệu (%s) → vẫn chép lưới", e)
             return None
 
     @staticmethod

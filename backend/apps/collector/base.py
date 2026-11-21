@@ -1,4 +1,4 @@
-"""Phần chung của mọi agent thao tác MES: kiểm tra WPS, mở/kết nối MESClient, tự đăng nhập, đóng popup"""
+"""Phần chung của mọi agent thao tác MES: mở/kết nối MESClient, tự đăng nhập, đóng popup"""
 import logging
 import time
 from pathlib import Path
@@ -7,14 +7,11 @@ from . import winutil
 from .clipboard_guard import ClipboardGuard
 from .errors import AgentError
 from .mes_client import MesClient
-from .sheet_bridge import SheetBridge
 
-# ProgID COM của app bảng tính (WPS Spreadsheets đăng ký "Ket.Application")
-SPREADSHEET_PROGIDS = ("Ket.Application", "Excel.Application", "KET.Application", "ET.Application")
 
 DEFAULT_CONFIG = {
     "view_wait": 8,                 # chờ MES tải dữ liệu sau khi bấm View (giây)
-    "export_timeout": 240,          # chờ WPS nhận dữ liệu sau khi bấm Excel (giây)
+    "export_timeout": 240,          # sản lượng: chờ MES ghi xong file sau khi bấm Excel (giây)
     "auto_dismiss_upgrade": True,   # tự bấm No ở hộp thoại hỏi nâng cấp
     "exe_path": "",                 # đường dẫn MESClient.exe để tự mở
     "auto_start": True,
@@ -24,7 +21,6 @@ DEFAULT_CONFIG = {
     "login_timeout": 60,
     "step_retries": 3,              # số lần làm 1 bước (1 ngày sản lượng / 1 xưởng) khi gặp lỗi tạm thời
     "retry_wait": 5,                # nghỉ giữa 2 lần thử (giây)
-    "kill_leftover_wps": True,
     "clipboard_kill_list": "et.exe,wps.exe,wpsoffice.exe,wpscloudsvr.exe,wpscenter.exe,ksolaunch.exe",   # app ĐƯỢC PHÉP tắt khi đang giữ clipboard
     "clipboard_priority": True,     # ưu tiên scan MES: được tắt mọi app giữ clipboard (job xong tự mở lại)
     "clipboard_protect_list": "",   # app không bao giờ tắt
@@ -36,13 +32,12 @@ DEFAULT_CONFIG = {
 # KHÔNG có MES_POPUP_BLOCKING: lỗi đó = đã thử mọi cách đóng hộp thoại mà vẫn còn → làm lại cũng vô ích, dừng job.
 RETRYABLE_CODES = {
     "CLIPBOARD_BUSY",
+    "MES_GRID_COPY_EMPTY",        # Ctrl+C không chép được gì (màn hình khóa / bị che) → làm lại
     "MES_SESSION_LOST",           # "Session Not Connected": phiên MES rớt → tắt + mở lại MES, đăng nhập lại
     "MES_POPUP_ERROR",            # MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) — đã tự đóng
     "MES_BUSY_TIMEOUT",
     "MES_SAVE_DIALOG_NOT_FOUND",
     "MES_SAVE_DIALOG_FAILED",
-    "SHEET_EXPORT_TIMEOUT",
-    "SHEET_DATA_UNSTABLE",
     "MES_DATA_MISMATCH",
 }
 
@@ -50,16 +45,11 @@ RETRYABLE_CODES = {
 # Phiên MES với máy chủ đã rớt (19/11: sau 30 phút chờ clipboard) → mọi thao tác sau đều lỗi "Object reference..."
 # và hộp thoại có khi không đóng được → chỉ có cách tắt hẳn MES, mở lại, đăng nhập lại
 SESSION_LOST_WORDS = ("session not connected",)
-# MES gọi COM Excel.Application ({00024500-...}) để xuất; WPS mất đăng ký "tương thích MS Office" → 80040154.
-# Làm lại vô ích → báo lỗi ngay kèm cách sửa
-EXCEL_NOT_REGISTERED_WORDS = ("80040154", "class not registered")
 
 
 def classify(e: Exception) -> str | None:
     """Mã lỗi thật của e (ưu tiên nội dung hộp thoại MES hơn mã chung MES_POPUP_ERROR/MES_POPUP_BLOCKING)"""
     msg = str(e).lower()
-    if any(w in msg for w in EXCEL_NOT_REGISTERED_WORDS):
-        return "EXCEL_COM_NOT_REGISTERED"
     if any(w in msg for w in SESSION_LOST_WORDS):
         return "MES_SESSION_LOST"
     return getattr(e, "code", None)
@@ -71,15 +61,12 @@ class BaseCollector:
         self.log = log
         self.cfg = {**DEFAULT_CONFIG, **(config or {})}
         self.mes = MesClient(log, self.cfg["auto_dismiss_upgrade"])
-        self.sheets = SheetBridge(SPREADSHEET_PROGIDS, log)
         self.clip = ClipboardGuard(log, self.cfg)
         self.form = None
 
     def prepare(self, _restarted: bool = False):
-        """Bước chuẩn bị chung — lỗi ở đây có mã lỗi rõ ràng (SHEET_APP_MISSING, MES_NOT_RUNNING, MES_LOGIN_*...)"""
+        """Bước chuẩn bị chung — lỗi ở đây có mã lỗi rõ ràng (MES_NOT_RUNNING, MES_LOGIN_*...)"""
         self.clip.resume_leftovers()           # worker chết lúc đang tạm dừng app → cho chạy lại
-        progid = self.sheets.check_available()
-        self.log.info("Máy agent có bảng tính COM: %s", progid)
         self.mes.connect(self.cfg["exe_path"], self.cfg["auto_start"], self.cfg["start_timeout"])
         self._remember_exe_path()
         # Hộp thoại Save As / Confirm Save As còn sót của lần chạy trước khóa MES → đóng trước khi làm gì khác
@@ -123,9 +110,6 @@ class BaseCollector:
                 result = fn(*args, **kwargs)
             except Exception as e:
                 code = classify(e)
-                if code == "EXCEL_COM_NOT_REGISTERED":
-                    self.mes.resolve_popups(False, str(e))
-                    raise AgentError(f"{e} — WPS mất đăng ký tương thích Excel, làm lại vô ích", code) from e
                 if code == "MES_SESSION_LOST" and isinstance(e, AgentError):
                     e.code = code
                 if not isinstance(e, AgentError) or code not in RETRYABLE_CODES or i >= attempts:
