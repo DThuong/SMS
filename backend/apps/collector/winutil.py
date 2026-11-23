@@ -138,6 +138,74 @@ def focus_in_thread(hwnd: int) -> None:
                 pass
 
 
+def desktop_active() -> bool:
+    """Màn hình đang mở khóa (desktop nhập liệu là 'Default')? Khóa màn hình / chưa đăng nhập → False:
+    lúc đó chuột/bàn phím thật (SendInput) không dùng được, chỉ gửi message vào cửa sổ được"""
+    try:
+        u = ctypes.windll.user32
+        h = u.OpenInputDesktop(0, False, 0x0001)          # DESKTOP_READOBJECTS
+        if not h:
+            return False
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            need = _wt.DWORD()
+            u.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need))   # UOI_NAME
+            return buf.value.lower() == "default"
+        finally:
+            u.CloseDesktop(h)
+    except Exception:
+        return False
+
+
+def post_click_at(hwnd: int, x: int, y: int):
+    """Bấm chuột trái vào điểm (x, y) TRONG cửa sổ bằng message — không di chuột thật, chạy được cả khi khóa màn hình"""
+    lp = (y << 16) | (x & 0xFFFF)
+    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, lp)
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lp)
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lp)
+
+
+def post_combo(hwnd: int, keys: list[int], mods: tuple[int, ...] = (), wait: float = 0.8):
+    """
+    Gửi tổ hợp phím (vd Ctrl+C) bằng message, KHÔNG dùng bàn phím thật (chạy được khi khóa màn hình).
+    WinForms đọc phím Ctrl/Shift bằng GetKeyState trên luồng giao diện của app → nối hàng đợi nhập của mình với
+    luồng đó (AttachThreadInput), đặt Ctrl/Shift = đang nhấn (SetKeyboardState), gửi phím, chờ app xử lý xong
+    rồi trả lại trạng thái cũ.
+    """
+    import time
+
+    import win32process
+    u = ctypes.windll.user32
+    tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+    me = win32api.GetCurrentThreadId()
+    attached = bool(u.AttachThreadInput(me, tid, True)) if tid and tid != me else False
+    state = (ctypes.c_ubyte * 256)()
+    try:
+        u.GetKeyboardState(state)
+        old = bytes(state)
+        side = {win32con.VK_CONTROL: win32con.VK_LCONTROL, win32con.VK_SHIFT: win32con.VK_LSHIFT}
+        for m in mods:
+            state[m] = 0x80
+            if m in side:
+                state[side[m]] = 0x80
+        u.SetKeyboardState(state)
+        for m in mods:
+            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, m, 1 | (win32api.MapVirtualKey(m, 0) << 16))
+        for vk in keys:
+            lp = 1 | (win32api.MapVirtualKey(vk, 0) << 16)
+            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, lp)
+            win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk, lp | 0xC0000000)
+        time.sleep(wait)                    # để app đọc phím trong lúc Ctrl/Shift còn "đang nhấn"
+        for m in reversed(mods):
+            win32api.PostMessage(hwnd, win32con.WM_KEYUP, m, 1 | (win32api.MapVirtualKey(m, 0) << 16) | 0xC0000000)
+        time.sleep(0.2)
+        ctypes.memmove(state, old, 256)
+        u.SetKeyboardState(state)
+    finally:
+        if attached:
+            u.AttachThreadInput(me, tid, False)
+
+
 def type_into_edit(hwnd: int, text: str, full: bool = False, timeout_ms: int = 3000) -> str:
     """
     Điền chữ vào ô Edit SAO CHO app coi như người dùng tự gõ (hộp thoại Save As của Windows bỏ qua WM_SETTEXT

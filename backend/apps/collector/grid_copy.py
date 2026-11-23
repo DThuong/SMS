@@ -1,7 +1,8 @@
 """
 Lấy dữ liệu lưới FarPoint của MES bằng CHÉP / DÁN như thao tác tay (thay nút Excel → WPS hay lỗi, 21/11):
   bấm ô góc trái-trên của lưới (chọn hết) → Ctrl+C → đọc chữ trong clipboard (cột cách nhau Tab) → DataFrame.
-DÙNG CHUỘT + BÀN PHÍM THẬT: máy MES phải đang mở khóa màn hình, không ai dùng chuột trong lúc này (~5 giây).
+Ưu tiên GỬI MESSAGE vào lưới (không chuột/bàn phím thật, chạy cả khi KHÓA MÀN HÌNH); không được mới dùng chuột thật
+(chỉ khi màn hình mở khóa).
 """
 import ctypes
 import re
@@ -56,47 +57,97 @@ def _scale(hwnd: int) -> float:
         return 1.0
 
 
+def _copy_with(select, log, name: str, settle: float) -> str:
+    clear_clipboard()
+    select()
+    time.sleep(settle)
+    text = read_clipboard_text()
+    lines = [x for x in text.splitlines() if x.strip()]
+    log.info("Chép lưới (%s): %d dòng chữ, %d cột", name, len(lines),
+             max((x.count("\t") + 1 for x in lines), default=0))
+    return text
+
+
+def _good(text: str) -> bool:
+    lines = [x for x in text.splitlines() if x.strip()]
+    return len(lines) >= 2 and any(all(k in x for k in HEADER_KEYS) for x in lines[:3])
+
+
 def copy_grid(grid_hwnd: int, top_hwnd: int, log, settle: float = 1.0) -> str:
     """
-    Thử lần lượt các cách chọn hết lưới rồi Ctrl+C, trả chữ chép được NHIỀU DÒNG NHẤT:
-      1. bấm ô góc trái-trên (giao của tiêu đề cột và cột số dòng) — cách chọn hết của FarPoint
-      2. bấm ô dữ liệu đầu tiên → Ctrl+A
-      3. bấm ô dữ liệu đầu tiên → Ctrl+Home → Ctrl+Shift+End (bôi từ đầu tới cuối)
+    Chọn hết lưới → Ctrl+C → trả chữ chép được NHIỀU DÒNG NHẤT. Thứ tự thử:
+      A. GỬI MESSAGE vào lưới (không chuột/bàn phím thật — chạy được cả khi máy MES KHÓA MÀN HÌNH, 22–23/11):
+         1. bấm ô góc trái-trên  2. Ctrl+A  3. Ctrl+Home → Ctrl+Shift+End     (mỗi cách xong gửi Ctrl+C)
+      B. Chuột + bàn phím THẬT (cách đã chạy 21/11) — chỉ khi màn hình đang mở khóa
     """
-    from pywinauto import keyboard, mouse
+    from . import winutil
 
-    try:
-        win32gui.ShowWindow(top_hwnd, win32con.SW_SHOW)
-        win32gui.SetForegroundWindow(top_hwnd)
-    except Exception:
-        pass
-    time.sleep(0.5)
-    l, t, _r, _b = win32gui.GetWindowRect(grid_hwnd)
+    C, A, HOME, END = ord("C"), ord("A"), win32con.VK_HOME, win32con.VK_END
+    CTRL, SHIFT = win32con.VK_CONTROL, win32con.VK_SHIFT
     s = _scale(grid_hwnd)
-    corner = (l + int(14 * s), t + int(18 * s))
-    first_cell = (l + int(60 * s), t + int(50 * s))
+    # tọa độ trong lưới (client): ô góc và ô dữ liệu đầu
+    cx, cy = int(14 * s), int(18 * s)
+    fx, fy = int(60 * s), int(50 * s)
+
+    def focus():
+        winutil.focus_in_thread(grid_hwnd)
+        time.sleep(0.2)
+
+    def ctrl_c():
+        winutil.post_combo(grid_hwnd, [C], (CTRL,))
+
     tries = [
-        ("bấm ô góc chọn hết", lambda: mouse.click(coords=corner)),
-        ("Ctrl+A", lambda: (mouse.click(coords=first_cell), time.sleep(0.3), keyboard.send_keys("^a"))),
-        ("bôi Ctrl+Home → Ctrl+Shift+End", lambda: (mouse.click(coords=first_cell), time.sleep(0.3),
-                                                      keyboard.send_keys("^{HOME}"), time.sleep(0.2),
-                                                      keyboard.send_keys("^+{END}"))),
+        ("message: bấm ô góc + Ctrl+C",
+         lambda: (focus(), winutil.post_click_at(grid_hwnd, cx, cy), time.sleep(0.5), ctrl_c())),
+        ("message: Ctrl+A + Ctrl+C",
+         lambda: (focus(), winutil.post_click_at(grid_hwnd, fx, fy), time.sleep(0.4),
+                  winutil.post_combo(grid_hwnd, [A], (CTRL,)), ctrl_c())),
+        ("message: Ctrl+Home → Ctrl+Shift+End + Ctrl+C",
+         lambda: (focus(), winutil.post_click_at(grid_hwnd, fx, fy), time.sleep(0.4),
+                  winutil.post_combo(grid_hwnd, [HOME], (CTRL,), 0.4),
+                  winutil.post_combo(grid_hwnd, [END], (CTRL, SHIFT)), ctrl_c())),
     ]
     best = ""
     for name, select in tries:
-        clear_clipboard()
-        select()
-        time.sleep(0.5)
-        keyboard.send_keys("^c")
-        time.sleep(settle)
-        text = read_clipboard_text()
-        lines = [x for x in text.splitlines() if x.strip()]
-        log.info("Chép lưới (%s): %d dòng chữ, %d cột", name, len(lines),
-                 max((x.count("\t") + 1 for x in lines), default=0))
-        if len(lines) > len(best.splitlines()):
+        try:
+            text = _copy_with(select, log, name, settle)
+        except Exception as e:
+            log.info("Chép lưới (%s) lỗi: %s", name, e)
+            continue
+        if len(text.splitlines()) > len(best.splitlines()):
             best = text
-        if len(lines) >= 2 and any(all(k in x for k in HEADER_KEYS) for x in lines[:3]):
-            break                                   # có cả dòng tiêu đề + dữ liệu → đủ
+        if _good(text):
+            clear_clipboard()
+            return text
+
+    if not winutil.desktop_active():
+        log.warning("Máy MES đang KHÓA MÀN HÌNH → không dùng được chuột thật; cách gửi message không chép được đủ lưới")
+    else:
+        from pywinauto import keyboard, mouse
+        try:
+            win32gui.ShowWindow(top_hwnd, win32con.SW_SHOW)
+            win32gui.SetForegroundWindow(top_hwnd)
+        except Exception:
+            pass
+        time.sleep(0.5)
+        l, t, _r, _b = win32gui.GetWindowRect(grid_hwnd)
+        real = [
+            ("chuột thật: bấm ô góc + Ctrl+C",
+             lambda: (mouse.click(coords=(l + cx, t + cy)), time.sleep(0.5), keyboard.send_keys("^c"))),
+            ("chuột thật: Ctrl+A + Ctrl+C",
+             lambda: (mouse.click(coords=(l + fx, t + fy)), time.sleep(0.3), keyboard.send_keys("^a"),
+                      time.sleep(0.3), keyboard.send_keys("^c"))),
+        ]
+        for name, select in real:
+            try:
+                text = _copy_with(select, log, name, settle)
+            except Exception as e:
+                log.info("Chép lưới (%s) lỗi: %s", name, e)
+                continue
+            if len(text.splitlines()) > len(best.splitlines()):
+                best = text
+            if _good(text):
+                break
     clear_clipboard()                               # bỏ dữ liệu lớn khỏi clipboard
     return best
 
@@ -115,6 +166,11 @@ def _convert(col: pd.Series) -> pd.Series:
     return col.replace("", None)
 
 
+def _desktop_active() -> bool:
+    from .winutil import desktop_active
+    return desktop_active()
+
+
 def parse_grid_text(text: str) -> pd.DataFrame:
     """Chữ chép từ lưới (Tab/xuống dòng) → DataFrame có tên cột như tiêu đề lưới MES (giống file Excel cũ)"""
     from .errors import MesError
@@ -122,8 +178,9 @@ def parse_grid_text(text: str) -> pd.DataFrame:
     rows = [r.split("\t") for r in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     rows = [[c.strip() for c in r] for r in rows if any(c.strip() for c in r)]
     if not rows:
-        raise MesError("Ctrl+C không chép được gì từ lưới MES (máy MES đang khóa màn hình / có người dùng chuột / "
-                       "cửa sổ MES bị che?) → làm lại", "MES_GRID_COPY_EMPTY")
+        raise MesError("Ctrl+C không chép được gì từ lưới MES (đã thử gửi message"
+                       + ("" if _desktop_active() else "; máy MES đang KHÓA MÀN HÌNH nên không thử được chuột thật")
+                       + ") → làm lại", "MES_GRID_COPY_EMPTY")
     hdr = next((i for i, r in enumerate(rows[:5]) if all(k in r for k in HEADER_KEYS)), None)
     if hdr is None:
         preview = " | ".join("\t".join(r)[:120] for r in rows[:2])
