@@ -1304,7 +1304,7 @@ class MesClient:
         if is_open():
             for h in roots:
                 winutil.post_keys(h, [win32con.VK_ESCAPE])
-            raise MesError(f"Đã chọn {value} trong danh sách {what} nhưng danh sách không đóng", "MES_CODE_SELECT_FAILED")
+            raise MesError(f"Đã chọn {value} trong danh sách {what} nhưng danh sách không đóng", "MES_CODE_LIST_STUCK")
 
     # ================= Combo (vd kiểu kỳ: Curr.D / Prev.D / ... / Period) =================
     def find_combo_with_item(self, form, item: str) -> int:

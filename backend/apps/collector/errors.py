@@ -50,6 +50,8 @@ ERROR_HINTS: dict[str, tuple[str, str]] = {
     "MES_SESSION_LOST": ("Phiên MES rớt kết nối (Session Not Connected)",
                          "Agent đã tự tắt + mở lại MESClient và đăng nhập lại mà vẫn lỗi → kiểm tra mạng máy MES / "
                          "máy chủ MES, thử đăng nhập MES bằng tay."),
+    "MES_CODE_LIST_STUCK": ("Danh sách Plant/Oper của MES không đóng sau khi chọn",
+                            "MES phản hồi chậm; agent đã tự đóng và làm lại nhiều lần mà vẫn lỗi → chạy lại job."),
     "MES_GRID_COPY_EMPTY": ("Không chép được lưới Work Order",
                             "Agent bấm chọn lưới + Ctrl+C nhưng clipboard trống. Máy MES phải MỞ KHÓA màn hình, cửa sổ MES "
                             "không bị che, không ai dùng chuột/bàn phím lúc job Work Order chạy (~vài giây/xưởng)."),

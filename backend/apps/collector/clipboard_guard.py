@@ -387,7 +387,9 @@ class ClipboardGuard:
                 return ""
             time.sleep(0.5)
         info = diagnose()
-        self.log.warning("Clipboard bận — %s", _fmt(info))
+        self._locked_screen = not winutil.desktop_active()
+        self.log.warning("Clipboard bận — %s; màn hình máy MES: %s", _fmt(info),
+                         "ĐANG KHÓA" if self._locked_screen else "đang mở")
         others = clipboard_integrators()
         if others:
             self.log.info("Tiến trình có tích hợp clipboard đang chạy (không phải MES/WPS): %s", ", ".join(others))
@@ -460,6 +462,8 @@ class ClipboardGuard:
         data = _load(CULPRITS_FILE, {})
         hist = data.get("_timing", [])
         hist.append({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "locked_for_s": round(time.time() - busy_since),
+                     "screen_locked_when_busy": getattr(self, "_locked_screen", None),
+                     "screen_locked_on_release": not winutil.desktop_active(),
                      "exited_on_release": gone, "started_before_lock": young[:20],
                      "integrators": clipboard_integrators()})
         data["_timing"] = hist[-30:]

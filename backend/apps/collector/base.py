@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
 # KHÔNG có MES_POPUP_BLOCKING: lỗi đó = đã thử mọi cách đóng hộp thoại mà vẫn còn → làm lại cũng vô ích, dừng job.
 RETRYABLE_CODES = {
     "CLIPBOARD_BUSY",
+    "MES_CODE_LIST_STUCK",        # danh sách Plant/Oper chọn xong không đóng (MES chậm) → đóng, làm lại (23/11)
     "MES_GRID_COPY_EMPTY",        # Ctrl+C không chép được gì (màn hình khóa / bị che) → làm lại
     "MES_SESSION_LOST",           # "Session Not Connected": phiên MES rớt → tắt + mở lại MES, đăng nhập lại
     "MES_POPUP_ERROR",            # MES hiện hộp thoại lỗi (Request Reply Timeout, Clipboard...) — đã tự đóng
